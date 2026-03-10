@@ -1,0 +1,12 @@
+{
+  "checkIntervalMinutes": 5,
+  "failureThreshold": 3,
+  "recoveryCooldownMinutes": 15,
+  "statusTimeoutMs": 10000,
+  "dataDir": "./data",
+  "recoverySteps": [
+    "restart",
+    "install",
+    "restart"
+  ]
+}

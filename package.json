@@ -1,0 +1,26 @@
+{
+  "name": "openclawmonitor",
+  "version": "0.1.0",
+  "description": "External monitor and auto-recovery tool for the OpenClaw gateway",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "npm run build -- --pretty false && node dist/index.js check",
+    "report": "npm run build -- --pretty false && node dist/index.js report",
+    "start": "npm run build -- --pretty false && node dist/index.js watch"
+  },
+  "keywords": [
+    "openclaw",
+    "monitoring",
+    "healthcheck",
+    "reliability"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "typescript": "^5.9.3"
+  }
+}

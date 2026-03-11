@@ -28,6 +28,8 @@ interface SeriesPoint {
   total?: number;
   failed?: number;
   annotation?: string;
+  success?: number;
+  steps?: number;
 }
 
 interface UsageTrendSeries {
@@ -199,7 +201,7 @@ function buildDashboardData(options: RunOptions): Record<string, unknown> {
       connectedChannels,
     },
     charts: {
-      healthTimeline: buildHealthTimeline(allEvents, 24),
+      healthTimeline: buildHealthTimeline(allEvents, 48),
       recoveryCadence: buildRecoverySeries(allEvents, 7),
       eventActivity: buildEventActivity(allEvents, 7),
       usageTrend: buildUsageTrend(usageSources, 14),
@@ -336,53 +338,44 @@ function buildRecoverySeries(events: Array<{ timestamp: string; type: string; le
   const pointMap = new Map(points.map((point) => [point.bucket, point]));
 
   for (const event of events) {
-    if (event.type !== "recovery_result") {
+    if (event.type !== "recovery_result" && event.type !== "recovery_step") {
       continue;
     }
 
-    const bucket = isoDate(event.timestamp);
+    const bucket = localDateKey(event.timestamp);
     const point = pointMap.get(bucket);
     if (!point) {
       continue;
     }
 
-    point.value += 1;
-    point.annotation = event.level === "info" ? "Recovery finished healthy" : "Recovery ended unhealthy";
+    if (event.type === "recovery_step") {
+      point.steps = (point.steps ?? 0) + 1;
+    }
+    if (event.type === "recovery_result") {
+      point.success = (point.success ?? 0) + (event.level === "info" ? 1 : 0);
+      point.failed = (point.failed ?? 0) + (event.level === "error" ? 1 : 0);
+    }
+    point.value = (point.steps ?? 0) + (point.success ?? 0) + (point.failed ?? 0);
+    point.annotation = `${point.steps ?? 0} steps, ${point.success ?? 0} healthy completions, ${point.failed ?? 0} unhealthy completions`;
   }
 
   return points;
 }
 
 function buildHealthTimeline(
-  events: Array<{ timestamp: string; type: string; level: string }>,
+  events: Array<{ timestamp: string; type: string; level: string; message: string }>,
   hours: number,
 ): SeriesPoint[] {
-  const now = Date.now();
-  const points: SeriesPoint[] = [];
-
-  for (let offset = hours - 1; offset >= 0; offset -= 1) {
-    const from = now - (offset + 1) * 60 * 60 * 1000;
-    const to = now - offset * 60 * 60 * 1000;
-    const bucketEvents = events.filter(
-      (event) =>
-        (event.type === "health_check" || event.type === "health_check_error") &&
-        Date.parse(event.timestamp) >= from &&
-        Date.parse(event.timestamp) < to,
-    );
-
-    const failed = bucketEvents.filter((event) => event.level !== "info").length;
-    const value = bucketEvents.length > 0 ? (bucketEvents.length - failed) / bucketEvents.length : 0;
-    points.push({
-      bucket: new Date(from).toISOString(),
-      value,
-      total: bucketEvents.length,
-      failed,
-      annotation:
-        bucketEvents.length > 0 ? `${bucketEvents.length - failed}/${bucketEvents.length} checks healthy` : "No checks recorded",
-    });
-  }
-
-  return points;
+  return events
+    .filter((event) => event.type === "health_check" || event.type === "health_check_error")
+    .slice(-hours)
+    .map((event) => ({
+      bucket: event.timestamp,
+      value: event.level === "info" ? 1 : 0,
+      total: 1,
+      failed: event.level === "info" ? 0 : 1,
+      annotation: event.message,
+    }));
 }
 
 function buildEventActivity(
@@ -457,7 +450,7 @@ function createDailyBuckets(days: number): SeriesPoint[] {
     date.setHours(0, 0, 0, 0);
     date.setDate(date.getDate() - offset);
     buckets.push({
-      bucket: date.toISOString().slice(0, 10),
+      bucket: localDateKey(date),
       value: 0,
     });
   }
@@ -465,8 +458,12 @@ function createDailyBuckets(days: number): SeriesPoint[] {
   return buckets;
 }
 
-function isoDate(value: string): string {
-  return new Date(value).toISOString().slice(0, 10);
+function localDateKey(value: string | Date): string {
+  const date = typeof value === "string" ? new Date(value) : value;
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function prettifyEventType(value: string): string {
@@ -559,9 +556,7 @@ function renderHtml(): string {
         font-size: 1.05rem;
       }
       .topbar {
-        display: grid;
-        grid-template-columns: 1fr minmax(320px, 420px);
-        gap: 18px;
+        display: block;
         margin-top: 14px;
       }
       .meta {
@@ -578,9 +573,9 @@ function renderHtml(): string {
       }
       .action-panel {
         padding: 16px 18px;
-        border-radius: 22px;
-        background: var(--panel);
-        border: 1px solid rgba(255,255,255,0.66);
+        border-radius: 24px;
+        background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(243,247,246,0.94));
+        border: 1px solid rgba(18,34,41,0.08);
         box-shadow: 0 18px 40px var(--shadow);
       }
       .action-button {
@@ -616,12 +611,11 @@ function renderHtml(): string {
         gap: 14px;
       }
       .panel {
-        background: var(--panel);
-        border: 1px solid rgba(255,255,255,0.66);
+        background: linear-gradient(180deg, rgba(255,255,255,0.94), rgba(243,247,246,0.95));
+        border: 1px solid rgba(18,34,41,0.08);
         border-radius: 24px;
         padding: 18px;
         box-shadow: 0 18px 40px var(--shadow);
-        backdrop-filter: blur(14px);
       }
       .metric {
         font: 600 12px/1.4 "SF Mono", "Menlo", monospace;
@@ -631,7 +625,7 @@ function renderHtml(): string {
       }
       .value {
         margin-top: 8px;
-        font-size: 2rem;
+        font-size: 2.2rem;
         font-weight: 700;
         letter-spacing: -0.04em;
       }
@@ -665,8 +659,8 @@ function renderHtml(): string {
       .mini-card {
         padding: 14px;
         border-radius: 18px;
-        background: rgba(255,255,255,0.72);
-        border: 1px solid var(--line);
+        background: rgba(255,255,255,0.8);
+        border: 1px solid rgba(18,34,41,0.08);
       }
       .mini-title {
         color: var(--muted);
@@ -682,9 +676,9 @@ function renderHtml(): string {
       .chart-shell {
         margin-top: 14px;
         padding: 12px;
-        border-radius: 18px;
-        border: 1px solid var(--line);
-        background: linear-gradient(180deg, rgba(255,255,255,0.7), rgba(255,255,255,0.36));
+        border-radius: 20px;
+        border: 1px solid rgba(18,34,41,0.08);
+        background: linear-gradient(180deg, rgba(248,252,251,0.98), rgba(241,247,245,0.9));
       }
       .chart-help {
         margin-top: 10px;
@@ -776,17 +770,18 @@ function renderHtml(): string {
         font: 600 12px/1.5 "SF Mono", "Menlo", monospace;
         color: var(--muted);
         white-space: pre-wrap;
-        min-height: 54px;
+        min-height: 72px;
         padding: 12px;
         border-radius: 16px;
-        background: rgba(255,255,255,0.6);
-        border: 1px solid var(--line);
+        background: rgba(255,255,255,0.78);
+        border: 1px solid rgba(18,34,41,0.08);
         overflow-wrap: anywhere;
       }
       .controls-grid {
         display: grid;
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: 1.1fr 0.9fr;
         gap: 14px;
+        margin-bottom: 14px;
       }
       .field-grid {
         display: grid;
@@ -820,6 +815,100 @@ function renderHtml(): string {
         align-items: end;
         margin-bottom: 12px;
       }
+      .check-strip {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(10px, 1fr));
+        gap: 6px;
+      }
+      .check-cell {
+        height: 34px;
+        border-radius: 10px;
+        border: 1px solid rgba(18,34,41,0.06);
+        background: #d1d5db;
+      }
+      .check-cell.up {
+        background: linear-gradient(180deg, #22c55e, #15803d);
+      }
+      .check-cell.down {
+        background: linear-gradient(180deg, #fb7185, #b91c1c);
+      }
+      .bar-stack {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
+        gap: 10px;
+        align-items: end;
+        min-height: 216px;
+      }
+      .bar-col {
+        display: grid;
+        gap: 8px;
+        justify-items: center;
+        align-items: end;
+      }
+      .bar-stack-inner {
+        width: 100%;
+        max-width: 44px;
+        height: 176px;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        gap: 3px;
+      }
+      .bar-seg {
+        width: 100%;
+        border-radius: 10px 10px 6px 6px;
+      }
+      .bar-seg.steps { background: linear-gradient(180deg, #cbd5e1, #94a3b8); }
+      .bar-seg.ok { background: linear-gradient(180deg, #60a5fa, #2563eb); }
+      .bar-seg.fail { background: linear-gradient(180deg, #fdba74, #d97706); }
+      .bar-label {
+        color: var(--muted);
+        font: 600 10px/1.2 "SF Mono", "Menlo", monospace;
+        text-align: center;
+      }
+      .usage-bars {
+        display: grid;
+        gap: 10px;
+      }
+      .usage-day {
+        display: grid;
+        grid-template-columns: 84px 1fr auto;
+        gap: 10px;
+        align-items: center;
+      }
+      .usage-track {
+        position: relative;
+        height: 16px;
+        border-radius: 999px;
+        background: rgba(18,34,41,0.06);
+        overflow: hidden;
+      }
+      .usage-fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        border-radius: 999px;
+      }
+      .chart-legend {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 12px;
+        color: var(--muted);
+        font: 600 11px/1.3 "SF Mono", "Menlo", monospace;
+      }
+      .chart-legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .chart-legend i {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        display: inline-block;
+      }
       @media (max-width: 1000px) {
         .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .layout { grid-template-columns: 1fr; }
@@ -841,11 +930,6 @@ function renderHtml(): string {
         <div class="subtitle">Everything is shown in your local time zone. Hover charts for annotations, page through recent events, and trigger gateway actions directly from this dashboard.</div>
         <div class="topbar">
           <div class="meta" id="meta"></div>
-          <div class="action-panel">
-            <div class="metric">Quick actions</div>
-            <div class="action-row" id="actions"></div>
-            <div class="action-result" id="actionResult"></div>
-          </div>
         </div>
       </section>
 
@@ -878,6 +962,12 @@ function renderHtml(): string {
           </div>
           <div class="action-result" id="configResult"></div>
         </div>
+        <div class="action-panel">
+          <div class="metric">Quick actions</div>
+          <div class="label">Run one-time checks or gateway commands without leaving the dashboard.</div>
+          <div class="action-row" id="actions" style="margin-top:14px;"></div>
+          <div class="action-result" id="actionResult"></div>
+        </div>
       </section>
 
       <section class="layout">
@@ -888,23 +978,23 @@ function renderHtml(): string {
             <div class="mini-grid" id="secondary"></div>
           </div>
           <div class="panel">
-            <div class="metric">24h health quality</div>
+            <div class="metric">Recent check sequence</div>
             <div class="chart-shell" id="healthTimeline"></div>
-            <div class="chart-help">Each column is one local hour. Full height means every check in that hour was healthy. Hover to see exact pass/fail counts.</div>
+            <div class="chart-help">Each block is one recent health check in local time order. Green means up. Red means down. Hover a block for the exact timestamp and result.</div>
           </div>
           <div class="panel">
-            <div class="metric">Usage cost trend</div>
+            <div class="metric">Daily usage cost</div>
             <div class="chart-shell" id="usageTrend"></div>
-            <div class="chart-help">Each line is a usage source category. Hover a point to see the local day and exact cost for that source.</div>
+            <div class="chart-help">Daily bar view of total tracked cost across the last 14 local days. Hover a row for the exact day and amount.</div>
             <div class="legend" id="usageLegend"></div>
           </div>
         </div>
 
         <div class="stack">
           <div class="panel">
-            <div class="metric">Recovery cadence</div>
+            <div class="metric">Recovery activity</div>
             <div class="chart-shell" id="recoveryBars"></div>
-            <div class="chart-help">Daily recovery completions across the last 7 days. Hover bars for the exact local day and count.</div>
+            <div class="chart-help">Daily recovery work in the last 7 local days. Gray is executed steps, blue is healthy completion, and amber is unhealthy completion.</div>
           </div>
           <div class="panel">
             <div class="metric">Event activity by type</div>
@@ -1238,43 +1328,28 @@ function renderHtml(): string {
 
       function renderHealthTimeline(points) {
         if (!points.length) return emptyChart("No health data yet");
-        const width = 720;
-        const height = 210;
-        const columnWidth = Math.max(18, Math.floor((width - 40) / points.length) - 4);
-        return "<svg viewBox='0 0 " + width + " " + height + "' width='100%' height='210'>" +
-          points.map((point, index) => {
-            const x = 20 + index * ((width - 40) / points.length);
-            const barHeight = Math.max(6, point.value * 138);
-            const y = height - 42 - barHeight;
-            const fill = point.failed && point.failed > 0 ? "#d97706" : "#15803d";
-            const tooltip = [
-              "<strong>" + formatHour(point.bucket) + "</strong>",
-              point.annotation || "",
-              "Failed checks: " + number.format(point.failed || 0)
-            ].filter(Boolean).join("<br>");
-            return "<g><rect data-tip='" + escapeAttr(tooltip) + "' x='" + x + "' y='" + y + "' width='" + columnWidth + "' height='" + barHeight + "' rx='8' fill='" + fill + "' opacity='0.9'></rect>" +
-              (index % 4 === 0 ? "<text x='" + (x + 2) + "' y='" + (height - 12) + "' fill='#5e6f77' font-size='10'>" + formatHour(point.bucket) + "</text>" : "") +
-              "</g>";
-          }).join("") +
-          "</svg>";
+        return "<div class='check-strip'>" + points.map((point) => {
+          const tooltip = "<strong>" + formatDateTime(point.bucket) + "</strong><br>" + (point.value === 1 ? "Healthy" : "Unhealthy") + "<br>" + (point.annotation || "");
+          return "<div class='check-cell " + (point.value === 1 ? "up" : "down") + "' data-tip='" + escapeAttr(tooltip) + "'></div>";
+        }).join("") + "</div>" +
+          "<div class='chart-legend'><span><i style='background:#15803d'></i>Healthy check</span><span><i style='background:#b91c1c'></i>Unhealthy check</span></div>";
       }
 
       function renderRecoveryBars(points) {
-        if (!points.length || points.every((point) => point.value === 0)) return emptyChart("No recovery activity in the last 7 days");
-        const width = 420;
-        const height = 220;
-        const max = Math.max(...points.map((point) => point.value), 1);
-        const slot = (width - 34) / points.length;
-        return "<svg viewBox='0 0 " + width + " " + height + "' width='100%' height='220'>" +
-          points.map((point, index) => {
-            const x = 18 + index * slot;
-            const barHeight = (point.value / max) * 144;
-            const y = height - 42 - barHeight;
-            const tooltip = "<strong>" + formatShortDate(point.bucket) + "</strong><br>Recoveries: " + point.value + (point.annotation ? "<br>" + point.annotation : "");
-            return "<g><rect data-tip='" + escapeAttr(tooltip) + "' x='" + x + "' y='" + y + "' width='" + Math.max(18, slot - 10) + "' height='" + barHeight + "' rx='8' fill='#2563eb'></rect>" +
-              "<text x='" + (x + Math.max(18, slot - 10) / 2) + "' y='" + (height - 14) + "' text-anchor='middle' fill='#5e6f77' font-size='10'>" + formatShortDate(point.bucket) + "</text></g>";
-          }).join("") +
-          "</svg>";
+        if (!points.length || points.every((point) => point.value === 0)) return emptyChart("No recovery activity in the last 7 local days");
+        const max = Math.max(...points.map((point) => (point.steps || 0) + (point.success || 0) + (point.failed || 0)), 1);
+        return "<div class='bar-stack'>" + points.map((point) => {
+          const steps = Math.round(((point.steps || 0) / max) * 160);
+          const ok = Math.round(((point.success || 0) / max) * 160);
+          const fail = Math.round(((point.failed || 0) / max) * 160);
+          const tooltip = "<strong>" + formatShortDate(point.bucket) + "</strong><br>" + (point.annotation || "");
+          return "<div class='bar-col' data-tip='" + escapeAttr(tooltip) + "'><div class='bar-stack-inner'>" +
+            ((point.steps || 0) > 0 ? "<div class='bar-seg steps' style='height:" + Math.max(10, steps) + "px'></div>" : "") +
+            ((point.success || 0) > 0 ? "<div class='bar-seg ok' style='height:" + Math.max(10, ok) + "px'></div>" : "") +
+            ((point.failed || 0) > 0 ? "<div class='bar-seg fail' style='height:" + Math.max(10, fail) + "px'></div>" : "") +
+            "</div><div class='bar-label'>" + formatShortDate(point.bucket) + "</div></div>";
+        }).join("") + "</div>" +
+          "<div class='chart-legend'><span><i style='background:#94a3b8'></i>Recovery steps</span><span><i style='background:#2563eb'></i>Healthy completion</span><span><i style='background:#d97706'></i>Unhealthy completion</span></div>";
       }
 
       function renderEventActivity(items) {
@@ -1291,35 +1366,19 @@ function renderHtml(): string {
 
       function renderUsageTrend(seriesList) {
         if (!seriesList.length) return emptyChart("No usage data available");
-        const width = 720;
-        const height = 220;
-        const allPoints = seriesList.flatMap((series) => series.points);
-        const max = Math.max(...allPoints.map((point) => point.value), 1);
-        const steps = Math.max(...seriesList.map((series) => series.points.length), 1);
-        const stepWidth = steps === 1 ? 0 : (width - 40) / (steps - 1);
-        const labels = seriesList[0]?.points || [];
-
-        return "<svg viewBox='0 0 " + width + " " + height + "' width='100%' height='220' preserveAspectRatio='none'>" +
-          seriesList.map((series, seriesIndex) => {
-            const color = palette(seriesIndex);
-            const coords = series.points.map((point, index) => {
-              const x = 20 + index * stepWidth;
-              const y = height - 34 - ((point.value / max) * 150);
-              return { x, y, point };
-            });
-            const path = coords.map((coord) => coord.x + "," + coord.y).join(" ");
-            return "<g><polyline points='" + path + "' fill='none' stroke='" + color + "' stroke-width='3' stroke-linecap='round'></polyline>" +
-              coords.map((coord) => {
-                const tooltip = "<strong>" + series.label + "</strong><br>" + formatShortDate(coord.point.bucket) + "<br>Cost: " + money.format(coord.point.value) + (coord.point.annotation ? "<br>" + coord.point.annotation : "");
-                return "<circle data-tip='" + escapeAttr(tooltip) + "' cx='" + coord.x + "' cy='" + coord.y + "' r='4' fill='" + color + "'></circle>";
-              }).join("") +
-              "</g>";
-          }).join("") +
-          labels.filter((_, index) => index === 0 || index === labels.length - 1 || index === Math.floor(labels.length / 2)).map((point, index, arr) => {
-            const x = index === 0 ? 18 : index === arr.length - 1 ? width - 44 : width / 2 - 12;
-            return "<text x='" + x + "' y='" + (height - 8) + "' fill='#5e6f77' font-size='10'>" + formatShortDate(point.bucket) + "</text>";
-          }).join("") +
-          "</svg>";
+        const merged = new Map();
+        for (const series of seriesList) {
+          for (const point of series.points) {
+            merged.set(point.bucket, (merged.get(point.bucket) || 0) + point.value);
+          }
+        }
+        const items = Array.from(merged.entries()).map(([bucket, value]) => ({ bucket, value }));
+        const max = Math.max(...items.map((item) => item.value), 1);
+        return "<div class='usage-bars'>" + items.map((item) => {
+          const width = Math.max(4, (item.value / max) * 100);
+          const tooltip = "<strong>" + formatShortDate(item.bucket) + "</strong><br>Total cost: " + money.format(item.value);
+          return "<div class='usage-day' data-tip='" + escapeAttr(tooltip) + "'><div class='bar-label' style='text-align:left;'>" + formatShortDate(item.bucket) + "</div><div class='usage-track'><div class='usage-fill' style='width:" + width + "%; background:linear-gradient(90deg,#0f766e,#2563eb);'></div></div><div class='bar-label'>" + money.format(item.value) + "</div></div>";
+        }).join("") + "</div>";
       }
 
       function emptyChart(label) {

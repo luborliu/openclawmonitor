@@ -166,6 +166,10 @@ export async function getGatewayUsageCost(timeoutMs: number, days: number): Prom
   );
 }
 
+export async function openDashboard(): Promise<{ stdout: string; stderr: string }> {
+  return execOpenClaw(["dashboard"], 15_000);
+}
+
 async function execOpenClaw(args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync(getOpenClawBinary(), args, {
     timeout: timeoutMs,

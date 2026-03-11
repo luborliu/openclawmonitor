@@ -6,6 +6,7 @@ import { installLaunchdService } from "./launchd";
 import { runCheck, type RunOptions } from "./monitor";
 import {
   getGatewayHealth,
+  openDashboard,
   runGatewayRecoveryStep,
   type CollectorSnapshot,
   type GatewayHealthSnapshot,
@@ -46,9 +47,9 @@ interface EventPage {
   totalPages: number;
 }
 
-type DashboardAction = Exclude<RecoveryStep, "install"> | "check";
+type DashboardAction = Exclude<RecoveryStep, "install"> | "check" | "open_gateway";
 
-const ACTIONS: DashboardAction[] = ["check", "start", "stop", "restart"];
+const ACTIONS: DashboardAction[] = ["check", "open_gateway", "start", "stop", "restart"];
 
 export function startDashboardServer(options: RunOptions): http.Server {
   const server = http.createServer(async (request, response) => {
@@ -112,6 +113,10 @@ export function startDashboardServer(options: RunOptions): http.Server {
         if (action === "check") {
           const exitCode = await runCheck(options);
           stdout = `One-time health check finished with exit code ${exitCode}.`;
+        } else if (action === "open_gateway") {
+          const result = await openDashboard();
+          stdout = result.stdout.trim() || "Opened OpenClaw dashboard.";
+          stderr = result.stderr.trim();
         } else {
           const result = await runGatewayActionWithFallback(
             action as Exclude<RecoveryStep, "install">,
@@ -232,8 +237,8 @@ function buildEventPage(
   const dataDir = ensureDataDir(path.resolve(options.config.dataDir));
   const search = query?.trim().toLowerCase() ?? "";
   const items = readEvents(dataDir)
+    .filter((event) => (type ? event.type === type : event.type !== "collector_snapshot"))
     .filter((event) => (level ? event.level === level : true))
-    .filter((event) => (type ? event.type === type : true))
     .filter((event) =>
       search.length > 0
         ? `${event.type} ${event.level} ${event.message}`.toLowerCase().includes(search)
@@ -257,7 +262,7 @@ function buildEventPage(
 }
 
 function listEventTypes(events: Array<{ type: string }>): string[] {
-  return Array.from(new Set(events.map((event) => event.type))).sort();
+  return Array.from(new Set(events.map((event) => event.type).filter((type) => type !== "collector_snapshot"))).sort();
 }
 
 function buildUiConfig(config: MonitorConfig): Record<string, number> {
@@ -1209,7 +1214,8 @@ function renderHtml(): string {
 
         document.getElementById("actions").innerHTML = (data.actions || []).map((action) => {
           const secondary = action === "stop" ? " secondary" : "";
-          const label = action === "check" ? "CHECK NOW" : action.toUpperCase();
+          const label =
+            action === "check" ? "CHECK NOW" : action === "open_gateway" ? "OPEN GATEWAY" : action.toUpperCase();
           return "<button class='action-button" + secondary + "' data-action='" + action + "' type='button'>" + label + "</button>";
         }).join("") + "<button class='action-button secondary' data-ui-action='config' type='button'>OVERRIDE CONFIG</button>";
         document.querySelectorAll("[data-action]").forEach((button) => {

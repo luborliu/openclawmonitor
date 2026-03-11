@@ -186,6 +186,7 @@ function buildDashboardData(options: RunOptions): Record<string, unknown> {
   const activeLatencyMs = activeTarget?.connect?.latencyMs ?? null;
   const sessionCount = activeTarget?.summary?.sessions?.count ?? health?.payload?.sessions?.count ?? 0;
   const connectedChannels = Object.values(health?.payload?.channels ?? {}).filter((channel) => channel.connected).length;
+  const linkedChannels = Object.values(health?.payload?.channels ?? {}).filter((channel) => channel.linked).length;
 
   return {
     generatedAt: new Date(now).toISOString(),
@@ -202,6 +203,7 @@ function buildDashboardData(options: RunOptions): Record<string, unknown> {
       activeLatencyMs,
       sessionCount,
       connectedChannels,
+      linkedChannels,
     },
     charts: {
       healthTimeline: buildHealthTimeline(allEvents, 48),
@@ -805,17 +807,8 @@ function renderHtml(): string {
         border: 1px solid rgba(18,34,41,0.08);
         overflow-wrap: anywhere;
       }
-      .controls-grid {
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 14px;
+      .action-strip {
         margin-bottom: 14px;
-      }
-      .controls-head {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
       }
       .field-grid {
         display: grid;
@@ -894,6 +887,17 @@ function renderHtml(): string {
         color: var(--muted);
         font: 600 10px/1.2 "SF Mono", "Menlo", monospace;
       }
+      .availability-controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .availability-window {
+        margin-top: 8px;
+        color: var(--muted);
+        font: 600 11px/1.4 "SF Mono", "Menlo", monospace;
+      }
       .bar-stack {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
@@ -957,8 +961,8 @@ function renderHtml(): string {
         .layout { grid-template-columns: 1fr; }
         .mini-grid { grid-template-columns: 1fr; }
         .topbar { grid-template-columns: 1fr; }
-        .controls-grid { grid-template-columns: 1fr; }
         .filter-row { grid-template-columns: 1fr; }
+        .availability-controls { grid-template-columns: 1fr; }
       }
       @media (max-width: 640px) {
         .grid { grid-template-columns: 1fr; }
@@ -978,19 +982,10 @@ function renderHtml(): string {
 
       <section id="summary" class="grid"></section>
 
-      <section class="controls-grid">
-        <div class="panel">
-          <div class="controls-head">
-            <div>
-              <div class="metric">Monitor controls</div>
-              <div class="label">Use quick actions for checks, restarts, and config override.</div>
-            </div>
-            <div class="muted">Start and restart will auto-install the gateway service if needed.</div>
-          </div>
-        </div>
+      <section class="action-strip">
         <div class="action-panel">
           <div class="metric">Quick actions</div>
-          <div class="label">Run one-time checks or gateway commands without leaving the dashboard.</div>
+          <div class="label">Run one-time checks, restart the gateway, or open config override. Start and restart will auto-install the service if needed.</div>
           <div class="action-row" id="actions" style="margin-top:14px;"></div>
           <div class="action-result" id="actionResult"></div>
         </div>
@@ -1006,7 +1001,18 @@ function renderHtml(): string {
           <div class="panel">
             <div class="metric">Availability trend</div>
             <div class="chart-shell" id="healthTimeline"></div>
-            <div class="chart-help">Line view of recent checks. High means healthy, low means unhealthy. Hover any point for the exact local timestamp and result.</div>
+            <div class="availability-controls">
+              <div class="field">
+                <label for="availabilityStart">Range start</label>
+                <input id="availabilityStart" type="range" min="0" max="0" value="0" />
+              </div>
+              <div class="field">
+                <label for="availabilityEnd">Range end</label>
+                <input id="availabilityEnd" type="range" min="1" max="1" value="1" />
+              </div>
+            </div>
+            <div class="availability-window" id="availabilityWindow"></div>
+            <div class="chart-help">Line view of recent checks with a selectable window. High means healthy, low means unhealthy. Hover any point for the exact local timestamp and result.</div>
           </div>
           <div class="panel">
             <div class="metric">Daily usage cost</div>
@@ -1135,6 +1141,9 @@ function renderHtml(): string {
       let configBusy = false;
       const eventFilters = { level: "", type: "", q: "" };
       let filterTimer = null;
+      let healthPoints = [];
+      let availabilityStartIndex = 0;
+      let availabilityEndIndex = 0;
 
       const tooltip = document.getElementById("tooltip");
       document.addEventListener("mouseover", (event) => {
@@ -1166,6 +1175,8 @@ function renderHtml(): string {
           document.getElementById("configModal").classList.remove("open");
         }
       });
+      document.getElementById("availabilityStart").addEventListener("input", () => updateAvailabilityWindow("start"));
+      document.getElementById("availabilityEnd").addEventListener("input", () => updateAvailabilityWindow("end"));
 
       refreshDashboard({ page: 1, resetTimer: true });
 
@@ -1195,7 +1206,7 @@ function renderHtml(): string {
 
         document.getElementById("secondary").innerHTML = [
           miniCard("Sessions", number.format(overview.sessionCount || 0)),
-          miniCard("Connected channels", number.format(overview.connectedChannels || 0)),
+          miniCard("Linked channels", number.format(overview.linkedChannels || 0)),
           miniCard("Collector snapshots", formatDateTime(data.latest?.healthCollectedAt || data.generatedAt))
         ].join("");
 
@@ -1211,7 +1222,9 @@ function renderHtml(): string {
           button.addEventListener("click", () => document.getElementById("configModal").classList.add("open"));
         });
 
-        document.getElementById("healthTimeline").innerHTML = renderHealthTimeline(data.charts?.healthTimeline || []);
+        healthPoints = data.charts?.healthTimeline || [];
+        syncAvailabilityControls();
+        renderAvailabilityChart();
         document.getElementById("recoveryBars").innerHTML = renderRecoveryBars(data.charts?.recoveryCadence || []);
         document.getElementById("eventActivity").innerHTML = renderEventActivity(data.charts?.eventActivity || []);
         document.getElementById("usageTrend").innerHTML = renderUsageTrend(data.charts?.usageTrend || []);
@@ -1400,6 +1413,48 @@ function renderHtml(): string {
         filterTimer = window.setTimeout(() => loadEvents(1), 220);
       }
 
+      function syncAvailabilityControls() {
+        const startInput = document.getElementById("availabilityStart");
+        const endInput = document.getElementById("availabilityEnd");
+        const maxIndex = Math.max(0, healthPoints.length - 1);
+        startInput.max = String(maxIndex);
+        endInput.max = String(maxIndex);
+        if (availabilityEndIndex === 0 || availabilityEndIndex > maxIndex) {
+          availabilityEndIndex = maxIndex;
+        }
+        if (availabilityStartIndex > availabilityEndIndex) {
+          availabilityStartIndex = Math.max(0, availabilityEndIndex - Math.min(11, maxIndex));
+        }
+        startInput.value = String(availabilityStartIndex);
+        endInput.value = String(availabilityEndIndex);
+      }
+
+      function updateAvailabilityWindow(source) {
+        const startInput = document.getElementById("availabilityStart");
+        const endInput = document.getElementById("availabilityEnd");
+        availabilityStartIndex = Number(startInput.value);
+        availabilityEndIndex = Number(endInput.value);
+        if (availabilityStartIndex > availabilityEndIndex) {
+          if (source === "start") {
+            availabilityEndIndex = availabilityStartIndex;
+            endInput.value = String(availabilityEndIndex);
+          } else {
+            availabilityStartIndex = availabilityEndIndex;
+            startInput.value = String(availabilityStartIndex);
+          }
+        }
+        renderAvailabilityChart();
+      }
+
+      function renderAvailabilityChart() {
+        const visible = healthPoints.slice(availabilityStartIndex, availabilityEndIndex + 1);
+        document.getElementById("healthTimeline").innerHTML = renderHealthTimeline(visible);
+        document.getElementById("availabilityWindow").textContent =
+          visible.length > 0
+            ? "Showing " + formatDateTime(visible[0].bucket) + " to " + formatDateTime(visible[visible.length - 1].bucket)
+            : "No checks in selected range";
+      }
+
       function miniCard(label, value) {
         return "<article class='mini-card'><div class='mini-title'>" + label + "</div><div class='mini-value'>" + value + "</div></article>";
       }
@@ -1424,7 +1479,7 @@ function renderHtml(): string {
             const fill = coord.point.value === 1 ? "#15803d" : "#b91c1c";
             return "<circle data-tip='" + escapeAttr(tooltip) + "' cx='" + coord.x + "' cy='" + coord.y + "' r='5' fill='" + fill + "' stroke='white' stroke-width='2'></circle>";
           }).join("") +
-          "</svg><div class='availability-axis'><span>Down</span><span>Recent checks</span><span>Up</span></div></div>" +
+          "</svg><div class='availability-axis'><span>" + formatShortDate(points[0].bucket) + "</span><span>Recent checks</span><span>" + formatShortDate(points[points.length - 1].bucket) + "</span></div></div>" +
           "<div class='chart-legend'><span><i style='background:#2563eb'></i>Availability line</span><span><i style='background:#15803d'></i>Healthy point</span><span><i style='background:#b91c1c'></i>Unhealthy point</span></div>";
       }
 

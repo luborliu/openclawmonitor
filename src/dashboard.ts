@@ -211,7 +211,7 @@ function buildDashboardData(options: RunOptions): Record<string, unknown> {
       linkedChannels,
     },
     charts: {
-      healthTimeline: buildHealthTimeline(allEvents, 24, 5),
+      healthTimeline: buildHealthTimeline(allEvents, 24, 15),
       recoveryCadence: buildRecoverySeries(allEvents, 7),
       eventActivity: buildEventActivity(allEvents, 7),
       usageTrend: buildUsageTrend(usageSources, 14),
@@ -428,8 +428,8 @@ function buildHealthTimeline(
       success: healthy,
       annotation:
         bucketEvents.length > 0
-          ? `${healthy}/${bucketEvents.length} healthy checks in this 5-minute window`
-          : "No checks recorded in this 5-minute window",
+          ? `${healthy}/${bucketEvents.length} healthy checks in this 15-minute window`
+          : "No checks recorded in this 15-minute window",
     });
   }
 
@@ -456,12 +456,12 @@ function buildEventActivity(
     health_check_error: "Health checks that could not run cleanly",
     recovery_step: "Gateway commands executed during recovery",
     recovery_result: "Final recovery outcomes",
-    collector_snapshot: "Successful collector snapshot writes",
     collector_error: "Collector failures",
     notification: "Alerts delivered to the local desktop",
   };
 
   return Array.from(counts.entries())
+    .filter(([key]) => key !== "collector_snapshot")
     .sort((a, b) => b[1] - a[1])
     .slice(0, 6)
     .map(([key, value]) => ({
@@ -990,7 +990,7 @@ function renderHtml(): string {
       <section class="hero">
         <div class="eyebrow">OpenClaw Monitor</div>
         <h1>Gateway control room</h1>
-        <div class="subtitle">Everything is shown in your local time zone. Hover charts for annotations, page through recent events, and trigger gateway actions directly from this dashboard.</div>
+        <div class="subtitle">Keep the gateway healthy, understand outages quickly, and take action without leaving the page.</div>
         <div class="topbar">
           <div class="meta" id="meta"></div>
         </div>
@@ -1001,7 +1001,7 @@ function renderHtml(): string {
       <section class="action-strip">
         <div class="action-panel">
           <div class="metric">Quick actions</div>
-          <div class="label">Run one-time checks, restart the gateway, or open config override. Start and restart will auto-install the service if needed.</div>
+          <div class="label">Check the gateway, bring it back up, or adjust monitor settings.</div>
           <div class="action-row" id="actions" style="margin-top:14px;"></div>
           <div class="action-result" id="actionResult"></div>
         </div>
@@ -1017,12 +1017,12 @@ function renderHtml(): string {
           <div class="panel">
             <div class="metric">Availability trend</div>
             <div class="chart-shell" id="healthTimeline"></div>
-            <div class="chart-help">Each point is a 5-minute bucket. The y-axis is uptime percentage for that 5-minute window. Hover a point for the exact local time range and counts.</div>
+            <div class="chart-help">See how steady the gateway stayed across the last 24 hours.</div>
           </div>
           <div class="panel">
             <div class="metric">Daily usage cost</div>
             <div class="chart-shell" id="usageTrend"></div>
-            <div class="chart-help">Daily bar view of total tracked cost across the last 14 local days. Hover a row for the exact day and amount.</div>
+            <div class="chart-help">Daily spend over the last 14 days.</div>
             <div class="legend" id="usageLegend"></div>
           </div>
         </div>
@@ -1031,12 +1031,12 @@ function renderHtml(): string {
           <div class="panel">
             <div class="metric">Recovery activity</div>
             <div class="chart-shell" id="recoveryBars"></div>
-            <div class="chart-help">Daily recovery work in the last 7 local days. Gray is executed steps, blue is healthy completion, and amber is unhealthy completion.</div>
+            <div class="chart-help">A quick look at when the monitor stepped in to recover the gateway.</div>
           </div>
           <div class="panel">
             <div class="metric">Event activity by type</div>
             <div class="chart-shell" id="eventActivity"></div>
-            <div class="chart-help">This shows which kinds of monitor activity happened most often in the last 7 days. Hover each bar for a plain-English explanation.</div>
+            <div class="chart-help">The kinds of gateway activity showing up most often this week.</div>
           </div>
           <div class="panel">
             <div class="metric">Usage by category</div>
@@ -1209,7 +1209,7 @@ function renderHtml(): string {
         document.getElementById("secondary").innerHTML = [
           miniCard("Sessions", number.format(overview.sessionCount || 0)),
           miniCard("Connected channels", (overview.connectedChannels || 0) + " of " + (overview.linkedChannels || 0)),
-          miniCard("Collector snapshots", formatDateTime(data.latest?.healthCollectedAt || data.generatedAt))
+          miniCard("Last snapshot", formatDateTime(data.latest?.healthCollectedAt || data.generatedAt))
         ].join("");
 
         document.getElementById("actions").innerHTML = (data.actions || []).map((action) => {
@@ -1450,7 +1450,7 @@ function renderHtml(): string {
             const fill = coord.point.value >= 100 ? "#15803d" : coord.point.value > 0 ? "#d97706" : "#b91c1c";
             return "<circle data-tip='" + escapeAttr(tooltip) + "' cx='" + coord.x + "' cy='" + coord.y + "' r='5' fill='" + fill + "' stroke='white' stroke-width='2'></circle>";
           }).join("") +
-          "</svg><div class='availability-axis'><span>" + formatShortDate(points[0].bucket) + "</span><span>5-minute uptime buckets</span><span>" + formatShortDate(points[points.length - 1].bucket) + "</span></div></div>" +
+          "</svg><div class='availability-axis'><span>" + formatShortDate(points[0].bucket) + "</span><span>15-minute uptime buckets</span><span>" + formatShortDate(points[points.length - 1].bucket) + "</span></div></div>" +
           "<div class='chart-legend'><span><i style='background:#2563eb'></i>Availability line</span><span><i style='background:#15803d'></i>100% uptime</span><span><i style='background:#d97706'></i>Partial uptime</span><span><i style='background:#b91c1c'></i>0% uptime</span></div>";
       }
 

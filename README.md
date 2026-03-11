@@ -1,4 +1,4 @@
-# OpenClaw Monitor - Keep Your OpenClaw Up 24/7
+# OpenClaw Monitor - _Keep Your OpenClaw Up 24/7_
 
 OpenClaw Monitor is a local watchdog and ops dashboard for the OpenClaw gateway.
 

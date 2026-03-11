@@ -206,7 +206,7 @@ function buildDashboardData(options: RunOptions): Record<string, unknown> {
       linkedChannels,
     },
     charts: {
-      healthTimeline: buildHealthTimeline(allEvents, 48),
+      healthTimeline: buildHealthTimeline(allEvents, 24, 5),
       recoveryCadence: buildRecoverySeries(allEvents, 7),
       eventActivity: buildEventActivity(allEvents, 7),
       usageTrend: buildUsageTrend(usageSources, 14),
@@ -395,17 +395,40 @@ function buildRecoverySeries(events: Array<{ timestamp: string; type: string; le
 function buildHealthTimeline(
   events: Array<{ timestamp: string; type: string; level: string; message: string }>,
   hours: number,
+  bucketMinutes: number,
 ): SeriesPoint[] {
-  return events
-    .filter((event) => event.type === "health_check" || event.type === "health_check_error")
-    .slice(-hours)
-    .map((event) => ({
-      bucket: event.timestamp,
-      value: event.level === "info" ? 1 : 0,
-      total: 1,
-      failed: event.level === "info" ? 0 : 1,
-      annotation: event.message,
-    }));
+  const relevant = events.filter((event) => event.type === "health_check" || event.type === "health_check_error");
+  const bucketMs = bucketMinutes * 60 * 1000;
+  const endMs = Date.now();
+  const startMs = endMs - hours * 60 * 60 * 1000;
+  const bucketCount = Math.ceil((endMs - startMs) / bucketMs);
+  const buckets: SeriesPoint[] = [];
+
+  for (let index = 0; index < bucketCount; index += 1) {
+    const bucketStart = startMs + index * bucketMs;
+    const bucketEnd = bucketStart + bucketMs;
+    const bucketEvents = relevant.filter((event) => {
+      const timestamp = Date.parse(event.timestamp);
+      return timestamp >= bucketStart && timestamp < bucketEnd;
+    });
+    const healthy = bucketEvents.filter((event) => event.level === "info").length;
+    const failed = bucketEvents.length - healthy;
+    const percent = bucketEvents.length > 0 ? (healthy / bucketEvents.length) * 100 : 100;
+
+    buckets.push({
+      bucket: new Date(bucketStart).toISOString(),
+      value: percent,
+      total: bucketEvents.length,
+      failed,
+      success: healthy,
+      annotation:
+        bucketEvents.length > 0
+          ? `${healthy}/${bucketEvents.length} healthy checks in this 5-minute window`
+          : "No checks recorded in this 5-minute window",
+    });
+  }
+
+  return buckets;
 }
 
 function buildEventActivity(
@@ -887,17 +910,6 @@ function renderHtml(): string {
         color: var(--muted);
         font: 600 10px/1.2 "SF Mono", "Menlo", monospace;
       }
-      .availability-toolbar {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
-        margin-top: 12px;
-      }
-      .availability-window {
-        color: var(--muted);
-        font: 600 11px/1.4 "SF Mono", "Menlo", monospace;
-      }
       .bar-stack {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
@@ -962,7 +974,6 @@ function renderHtml(): string {
         .mini-grid { grid-template-columns: 1fr; }
         .topbar { grid-template-columns: 1fr; }
         .filter-row { grid-template-columns: 1fr; }
-        .availability-toolbar { flex-direction: column; align-items: flex-start; }
       }
       @media (max-width: 640px) {
         .grid { grid-template-columns: 1fr; }
@@ -1001,11 +1012,7 @@ function renderHtml(): string {
           <div class="panel">
             <div class="metric">Availability trend</div>
             <div class="chart-shell" id="healthTimeline"></div>
-            <div class="availability-toolbar">
-              <div class="availability-window" id="availabilityWindow"></div>
-              <button class="action-button secondary" id="resetAvailabilityZoom" type="button">Reset zoom</button>
-            </div>
-            <div class="chart-help">Drag across the graph to zoom into a portion of time. High means healthy, low means unhealthy. Hover any point for the exact local timestamp and result.</div>
+            <div class="chart-help">Each point is a 5-minute bucket. The y-axis is uptime percentage for that 5-minute window. Hover a point for the exact local time range and counts.</div>
           </div>
           <div class="panel">
             <div class="metric">Daily usage cost</div>
@@ -1120,8 +1127,9 @@ function renderHtml(): string {
         month: "short",
         day: "numeric"
       });
-      const hourFormatter = new Intl.DateTimeFormat(undefined, {
-        hour: "numeric"
+      const timeOnlyFormatter = new Intl.DateTimeFormat(undefined, {
+        hour: "numeric",
+        minute: "2-digit"
       });
 
       let currentPage = 1;
@@ -1135,7 +1143,6 @@ function renderHtml(): string {
       const eventFilters = { level: "", type: "", q: "" };
       let filterTimer = null;
       let healthPoints = [];
-      let availabilityZoom = null;
 
       const tooltip = document.getElementById("tooltip");
       document.addEventListener("mouseover", (event) => {
@@ -1166,10 +1173,6 @@ function renderHtml(): string {
         if (event.target.id === "configModal") {
           document.getElementById("configModal").classList.remove("open");
         }
-      });
-      document.getElementById("resetAvailabilityZoom").addEventListener("click", () => {
-        availabilityZoom = null;
-        renderAvailabilityChart();
       });
 
       refreshDashboard({ page: 1, resetTimer: true });
@@ -1407,16 +1410,7 @@ function renderHtml(): string {
       }
 
       function renderAvailabilityChart() {
-        const visible = availabilityZoom
-          ? healthPoints.slice(availabilityZoom.start, availabilityZoom.end + 1)
-          : healthPoints;
-        document.getElementById("healthTimeline").innerHTML = renderHealthTimeline(visible);
-        document.getElementById("availabilityWindow").textContent =
-          visible.length > 0
-            ? "Showing " + formatDateTime(visible[0].bucket) + " to " + formatDateTime(visible[visible.length - 1].bucket)
-            : "No checks in selected range";
-        document.getElementById("resetAvailabilityZoom").disabled = !availabilityZoom;
-        attachAvailabilityBrush(visible);
+        document.getElementById("healthTimeline").innerHTML = renderHealthTimeline(healthPoints);
       }
 
       function miniCard(label, value) {
@@ -1430,107 +1424,28 @@ function renderHtml(): string {
         const xStep = points.length === 1 ? 0 : (width - 42) / (points.length - 1);
         const coords = points.map((point, index) => {
           const x = 22 + index * xStep;
-          const y = point.value === 1 ? 34 : height - 42;
+          const y = height - 42 - ((point.value / 100) * (height - 76));
           return { x, y, point };
         });
         const polyline = coords.map((coord) => coord.x + "," + coord.y).join(" ");
-        return "<div class='availability-wrap'><svg id='availabilitySvg' class='chart-svg' viewBox='0 0 " + width + " " + height + "' preserveAspectRatio='none'>" +
+        return "<div class='availability-wrap'><svg class='chart-svg' viewBox='0 0 " + width + " " + height + "' preserveAspectRatio='none'>" +
           "<line x1='22' y1='34' x2='" + (width - 18) + "' y2='34' stroke='rgba(18,34,41,0.08)' stroke-dasharray='4 6'></line>" +
+          "<line x1='22' y1='" + ((height - 42 + 34) / 2) + "' x2='" + (width - 18) + "' y2='" + ((height - 42 + 34) / 2) + "' stroke='rgba(18,34,41,0.06)' stroke-dasharray='4 6'></line>" +
           "<line x1='22' y1='" + (height - 42) + "' x2='" + (width - 18) + "' y2='" + (height - 42) + "' stroke='rgba(18,34,41,0.08)' stroke-dasharray='4 6'></line>" +
           "<polyline points='" + polyline + "' fill='none' stroke='#2563eb' stroke-width='4' stroke-linejoin='round' stroke-linecap='round'></polyline>" +
           coords.map((coord) => {
-            const tooltip = "<strong>" + formatDateTime(coord.point.bucket) + "</strong><br>" + (coord.point.value === 1 ? "Healthy" : "Unhealthy") + "<br>" + (coord.point.annotation || "");
-            const fill = coord.point.value === 1 ? "#15803d" : "#b91c1c";
+            const bucketEnd = new Date(Date.parse(coord.point.bucket) + 5 * 60 * 1000);
+            const tooltip =
+              "<strong>" + formatDateTime(coord.point.bucket) + " - " + formatTimeOnly(bucketEnd.toISOString()) + "</strong><br>" +
+              "Uptime: " + coord.point.value.toFixed(0) + "%<br>" +
+              "Healthy: " + number.format(coord.point.success || 0) + "<br>" +
+              "Failed: " + number.format(coord.point.failed || 0) + "<br>" +
+              (coord.point.annotation || "");
+            const fill = coord.point.value >= 100 ? "#15803d" : coord.point.value > 0 ? "#d97706" : "#b91c1c";
             return "<circle data-tip='" + escapeAttr(tooltip) + "' cx='" + coord.x + "' cy='" + coord.y + "' r='5' fill='" + fill + "' stroke='white' stroke-width='2'></circle>";
           }).join("") +
-          "<rect id='availabilityBrushSurface' x='22' y='18' width='" + (width - 40) + "' height='" + (height - 52) + "' fill='transparent'></rect>" +
-          "<rect id='availabilityBrushRect' x='0' y='18' width='0' height='" + (height - 52) + "' fill='rgba(37,99,235,0.16)' stroke='rgba(37,99,235,0.6)' stroke-dasharray='6 4' style='display:none;'></rect>" +
-          "</svg><div class='availability-axis'><span>" + formatShortDate(points[0].bucket) + "</span><span>Recent checks</span><span>" + formatShortDate(points[points.length - 1].bucket) + "</span></div></div>" +
-          "<div class='chart-legend'><span><i style='background:#2563eb'></i>Availability line</span><span><i style='background:#15803d'></i>Healthy point</span><span><i style='background:#b91c1c'></i>Unhealthy point</span></div>";
-      }
-
-      function attachAvailabilityBrush(visiblePoints) {
-        const svg = document.getElementById("availabilitySvg");
-        const surface = document.getElementById("availabilityBrushSurface");
-        const brushRect = document.getElementById("availabilityBrushRect");
-        if (!svg || !surface || !brushRect || visiblePoints.length < 2) {
-          return;
-        }
-
-        const minX = 22;
-        const maxX = 742;
-        let dragStartX = null;
-
-        surface.onmousedown = (event) => {
-          dragStartX = clampX(toSvgX(svg, event), minX, maxX);
-          brushRect.setAttribute("x", String(dragStartX));
-          brushRect.setAttribute("width", "0");
-          brushRect.style.display = "block";
-        };
-
-        surface.onmousemove = (event) => {
-          if (dragStartX === null) {
-            return;
-          }
-          const currentX = clampX(toSvgX(svg, event), minX, maxX);
-          const left = Math.min(dragStartX, currentX);
-          const width = Math.abs(currentX - dragStartX);
-          brushRect.setAttribute("x", String(left));
-          brushRect.setAttribute("width", String(width));
-        };
-
-        surface.onmouseup = (event) => {
-          if (dragStartX === null) {
-            return;
-          }
-          const currentX = clampX(toSvgX(svg, event), minX, maxX);
-          finalizeBrush(dragStartX, currentX, visiblePoints);
-          dragStartX = null;
-          brushRect.style.display = "none";
-        };
-
-        surface.onmouseleave = () => {
-          if (dragStartX === null) {
-            return;
-          }
-          dragStartX = null;
-          brushRect.style.display = "none";
-        };
-      }
-
-      function finalizeBrush(startX, endX, visiblePoints) {
-        if (Math.abs(endX - startX) < 18) {
-          return;
-        }
-
-        const minIndex = pointIndexFromX(Math.min(startX, endX), visiblePoints.length);
-        const maxIndex = pointIndexFromX(Math.max(startX, endX), visiblePoints.length);
-        const startPoint = visiblePoints[minIndex];
-        const endPoint = visiblePoints[maxIndex];
-        const globalStart = healthPoints.findIndex((point) => point.bucket === startPoint.bucket);
-        const globalEnd = healthPoints.findIndex((point) => point.bucket === endPoint.bucket);
-        if (globalStart >= 0 && globalEnd >= globalStart) {
-          availabilityZoom = { start: globalStart, end: globalEnd };
-          renderAvailabilityChart();
-        }
-      }
-
-      function toSvgX(svg, event) {
-        const rect = svg.getBoundingClientRect();
-        const scale = 760 / rect.width;
-        return (event.clientX - rect.left) * scale;
-      }
-
-      function pointIndexFromX(x, length) {
-        if (length <= 1) {
-          return 0;
-        }
-        const ratio = (x - 22) / (742 - 22);
-        return Math.max(0, Math.min(length - 1, Math.round(ratio * (length - 1))));
-      }
-
-      function clampX(value, min, max) {
-        return Math.max(min, Math.min(max, value));
+          "</svg><div class='availability-axis'><span>" + formatShortDate(points[0].bucket) + "</span><span>5-minute uptime buckets</span><span>" + formatShortDate(points[points.length - 1].bucket) + "</span></div></div>" +
+          "<div class='chart-legend'><span><i style='background:#2563eb'></i>Availability line</span><span><i style='background:#15803d'></i>100% uptime</span><span><i style='background:#d97706'></i>Partial uptime</span><span><i style='background:#b91c1c'></i>0% uptime</span></div>";
       }
 
       function renderRecoveryBars(points) {
@@ -1603,9 +1518,9 @@ function renderHtml(): string {
         return shortDateFormatter.format(new Date(value));
       }
 
-      function formatHour(value) {
+      function formatTimeOnly(value) {
         if (!value) return "n/a";
-        return hourFormatter.format(new Date(value));
+        return timeOnlyFormatter.format(new Date(value));
       }
 
       function percent(value) {

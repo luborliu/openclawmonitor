@@ -1,8 +1,10 @@
 # OpenClaw Monitor - _Keep Your OpenClaw Up 24/7_
 
-OpenClaw Monitor is a local watchdog and ops dashboard for the OpenClaw gateway.
+OpenClaw Monitor is a local watchdog and control room for the OpenClaw gateway.
 
-It is built for the failure mode where the gateway goes down, restart attempts do not fully bring it back, and you only notice later when something important has already stalled. This project keeps a close eye on the gateway, attempts recovery automatically, records what happened, and gives you a local control room to inspect health, recovery history, and usage.
+If your gateway sometimes drops, half-restarts, or quietly stays offline after an update or recovery attempt, this tool is built for that exact problem. It checks health on a schedule, tries to bring the gateway back when it stays down, records what happened, and gives you a clean local dashboard to see uptime, failures, recoveries, and usage at a glance.
+
+Use it when you want OpenClaw to feel less like a process you babysit and more like a service you can rely on.
 
 ![OpenClaw Monitor dashboard](assets/dashboard-overview.png)
 

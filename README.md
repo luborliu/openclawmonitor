@@ -1,4 +1,4 @@
-# OpenClaw Monitor
+# OpenClaw Monitor - Keep Your OpenClaw Up 24/7
 
 OpenClaw Monitor is a local watchdog and ops dashboard for the OpenClaw gateway.
 
@@ -73,17 +73,15 @@ That installs a `launchd` agent so checks continue running in the background.
 
 ## Commands
 
-```bash
-npm run build
-npm run check
-npm run collect
-npm start
-npm run dashboard
-npm run report
-npm run service:install
-npm run service:status
-npm run service:uninstall
-```
+- `npm run build`: compile the TypeScript project into `dist/`
+- `npm run check`: run one immediate health check and recovery pass if needed
+- `npm run collect`: refresh gateway probe, health, and usage-cost snapshots
+- `npm start`: run the monitor entrypoint directly
+- `npm run dashboard`: build and start the local dashboard server
+- `npm run report`: print a quick health and recovery summary in the terminal
+- `npm run service:install`: install the macOS `launchd` background service
+- `npm run service:status`: show whether the `launchd` service is loaded
+- `npm run service:uninstall`: remove the `launchd` background service
 
 ## Default configuration
 

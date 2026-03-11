@@ -1,8 +1,27 @@
 import path from "node:path";
 
 import type { MonitorConfig } from "./config";
-import { getGatewayHealth, runGatewayRecoveryStep } from "./openclaw";
-import { appendEvent, ensureDataDir, loadState, readEvents, saveState, type LogEvent } from "./storage";
+import {
+  getGatewayHealth,
+  getGatewayHealthSnapshot,
+  getGatewayProbe,
+  getGatewayUsageCost,
+  runGatewayRecoveryStep,
+  type CollectorSnapshot,
+  type GatewayHealthSnapshot,
+  type GatewayProbeResult,
+  type UsageCostSnapshot,
+} from "./openclaw";
+import { sendNotification } from "./notifier";
+import {
+  appendEvent,
+  ensureDataDir,
+  loadState,
+  readEvents,
+  saveState,
+  writeSnapshot,
+  type LogEvent,
+} from "./storage";
 
 export interface RunOptions {
   config: MonitorConfig;
@@ -22,6 +41,7 @@ export async function runCheck(options: RunOptions): Promise<number> {
 
     if (health.ok) {
       state.consecutiveFailures = 0;
+      delete state.failureStreakStartedAt;
       state.lastSuccessAt = now;
       appendAndPrint(dataDir, {
         timestamp: now,
@@ -33,11 +53,13 @@ export async function runCheck(options: RunOptions): Promise<number> {
           probeUrl: health.status?.gateway?.probeUrl ?? health.status?.rpc?.url,
         },
       });
+      await collectSnapshots(dataDir, options);
       saveState(dataDir, state);
       return 0;
     }
 
     state.consecutiveFailures += 1;
+    state.failureStreakStartedAt ??= now;
     state.lastFailureAt = now;
     appendAndPrint(dataDir, {
       timestamp: now,
@@ -47,8 +69,10 @@ export async function runCheck(options: RunOptions): Promise<number> {
       details: {
         consecutiveFailures: state.consecutiveFailures,
         command: health.command.join(" "),
-      },
-    });
+        },
+      });
+
+    await maybeSendDowntimeNotification(dataDir, state, options, now);
 
     if (shouldAttemptRecovery(state, options.config, now)) {
       const recoveryResult = await attemptRecovery(dataDir, options, state);
@@ -61,6 +85,7 @@ export async function runCheck(options: RunOptions): Promise<number> {
   } catch (error) {
     const now = new Date().toISOString();
     state.consecutiveFailures += 1;
+    state.failureStreakStartedAt ??= now;
     state.lastFailureAt = now;
 
     appendAndPrint(dataDir, {
@@ -73,6 +98,8 @@ export async function runCheck(options: RunOptions): Promise<number> {
         error: error instanceof Error ? error.message : String(error),
       },
     });
+
+    await maybeSendDowntimeNotification(dataDir, state, options, now);
 
     if (shouldAttemptRecovery(state, options.config, now)) {
       const recoveryResult = await attemptRecovery(dataDir, options, state);
@@ -122,6 +149,12 @@ export function buildReport(options: RunOptions): string {
   ].join("\n");
 }
 
+export async function runCollectorsOnly(options: RunOptions): Promise<number> {
+  const dataDir = ensureDataDir(path.resolve(options.config.dataDir));
+  await collectSnapshots(dataDir, options);
+  return 0;
+}
+
 async function attemptRecovery(
   dataDir: string,
   options: RunOptions,
@@ -165,6 +198,7 @@ async function attemptRecovery(
   const verification = await getGatewayHealth(options.config.statusTimeoutMs);
   if (verification.ok) {
     state.consecutiveFailures = 0;
+    delete state.failureStreakStartedAt;
     state.lastSuccessAt = new Date().toISOString();
     appendAndPrint(dataDir, {
       timestamp: new Date().toISOString(),
@@ -175,6 +209,7 @@ async function attemptRecovery(
         summary: verification.summary,
       },
     });
+    await collectSnapshots(dataDir, options);
     return { state, exitCode: 0 };
   }
 
@@ -187,6 +222,8 @@ async function attemptRecovery(
       summary: verification.summary,
     },
   });
+
+  await maybeSendRecoveryFailureNotification(dataDir, state, options, verification.summary);
 
   return { state, exitCode: 1 };
 }
@@ -213,4 +250,156 @@ function appendAndPrint(dataDir: string, event: LogEvent): void {
 function cleanOutput(output: string): string | undefined {
   const trimmed = output.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+async function collectSnapshots(dataDir: string, options: RunOptions): Promise<void> {
+  const tasks: Array<Promise<void>> = [];
+
+  if (options.config.collectors.probe) {
+    tasks.push(
+      collectOne<GatewayProbeResult>(dataDir, "probe", {
+        sourceId: "openclaw-gateway-probe",
+        label: "OpenClaw Gateway Probe",
+        payload: awaitable(() => getGatewayProbe(options.config.statusTimeoutMs)),
+      }),
+    );
+  }
+
+  if (options.config.collectors.health) {
+    tasks.push(
+      collectOne<GatewayHealthSnapshot>(dataDir, "health", {
+        sourceId: "openclaw-gateway-health",
+        label: "OpenClaw Gateway Health",
+        payload: awaitable(() => getGatewayHealthSnapshot(options.config.statusTimeoutMs)),
+      }),
+    );
+  }
+
+  if (options.config.collectors.usageCost) {
+    tasks.push(
+      collectOne<UsageCostSnapshot>(dataDir, "usage-cost", {
+        sourceId: "openclaw-gateway-usage-cost",
+        label: "OpenClaw Gateway Usage Cost",
+        category: options.config.usageGatewayCategory,
+        payload: awaitable(() =>
+          getGatewayUsageCost(options.config.statusTimeoutMs, options.config.collectors.usageCostDays),
+        ),
+      }),
+    );
+  }
+
+  await Promise.all(tasks);
+}
+
+async function collectOne<T>(
+  dataDir: string,
+  name: string,
+  input: {
+    sourceId: string;
+    label: string;
+    category?: string;
+    payload: Promise<T>;
+  },
+): Promise<void> {
+  try {
+    const payload = await input.payload;
+    const snapshot: CollectorSnapshot<T> = {
+      collectedAt: new Date().toISOString(),
+      sourceId: input.sourceId,
+      label: input.label,
+      payload,
+    };
+    if (input.category) {
+      snapshot.category = input.category;
+    }
+    writeSnapshot(dataDir, name, snapshot);
+    appendAndPrint(dataDir, {
+      timestamp: snapshot.collectedAt,
+      type: "collector_snapshot",
+      level: "info",
+      message: `Collected ${name} snapshot`,
+    });
+  } catch (error) {
+    appendAndPrint(dataDir, {
+      timestamp: new Date().toISOString(),
+      type: "collector_error",
+      level: "error",
+      message: `Failed to collect ${name} snapshot`,
+      details: {
+        error: error instanceof Error ? error.message : String(error),
+      },
+    });
+  }
+}
+
+async function maybeSendDowntimeNotification(
+  dataDir: string,
+  state: ReturnType<typeof loadState>,
+  options: RunOptions,
+  nowIso: string,
+): Promise<void> {
+  if (!options.config.notifications.enabled || !state.failureStreakStartedAt) {
+    return;
+  }
+
+  const downtimeMinutes = (Date.parse(nowIso) - Date.parse(state.failureStreakStartedAt)) / 60_000;
+  if (downtimeMinutes < options.config.notifications.downtimeAlertMinutes) {
+    return;
+  }
+
+  if (state.lastDowntimeAlertAt) {
+    const minutesSinceAlert = (Date.parse(nowIso) - Date.parse(state.lastDowntimeAlertAt)) / 60_000;
+    if (minutesSinceAlert < options.config.notifications.repeatAlertMinutes) {
+      return;
+    }
+  }
+
+  await sendNotification(
+    options.config.notifications,
+    "Gateway downtime",
+    `OpenClaw has been unhealthy for ${Math.round(downtimeMinutes)} minutes.`,
+  );
+  state.lastDowntimeAlertAt = nowIso;
+  appendAndPrint(dataDir, {
+    timestamp: nowIso,
+    type: "notification",
+    level: "warn",
+    message: `Sent downtime alert after ${Math.round(downtimeMinutes)} minutes`,
+  });
+}
+
+async function maybeSendRecoveryFailureNotification(
+  dataDir: string,
+  state: ReturnType<typeof loadState>,
+  options: RunOptions,
+  summary: string,
+): Promise<void> {
+  if (!options.config.notifications.enabled) {
+    return;
+  }
+
+  const nowIso = new Date().toISOString();
+  if (state.lastRecoveryFailureAlertAt) {
+    const minutesSinceAlert = (Date.parse(nowIso) - Date.parse(state.lastRecoveryFailureAlertAt)) / 60_000;
+    if (minutesSinceAlert < options.config.notifications.repeatAlertMinutes) {
+      return;
+    }
+  }
+
+  await sendNotification(
+    options.config.notifications,
+    "Recovery failed",
+    `OpenClaw is still unhealthy after recovery steps. ${summary}`,
+  );
+  state.lastRecoveryFailureAlertAt = nowIso;
+  appendAndPrint(dataDir, {
+    timestamp: nowIso,
+    type: "notification",
+    level: "error",
+    message: "Sent recovery failure alert",
+  });
+}
+
+function awaitable<T>(factory: () => Promise<T>): Promise<T> {
+  return factory();
 }

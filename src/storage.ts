@@ -5,9 +5,12 @@ export interface MonitorState {
   consecutiveFailures: number;
   totalChecks: number;
   totalRecoveries: number;
+  failureStreakStartedAt?: string;
   lastSuccessAt?: string;
   lastFailureAt?: string;
   lastRecoveryAt?: string;
+  lastDowntimeAlertAt?: string;
+  lastRecoveryFailureAlertAt?: string;
 }
 
 export interface LogEvent {
@@ -46,11 +49,20 @@ export function loadState(dataDir: string): MonitorState {
   if (typeof parsed.lastSuccessAt === "string") {
     state.lastSuccessAt = parsed.lastSuccessAt;
   }
+  if (typeof parsed.failureStreakStartedAt === "string") {
+    state.failureStreakStartedAt = parsed.failureStreakStartedAt;
+  }
   if (typeof parsed.lastFailureAt === "string") {
     state.lastFailureAt = parsed.lastFailureAt;
   }
   if (typeof parsed.lastRecoveryAt === "string") {
     state.lastRecoveryAt = parsed.lastRecoveryAt;
+  }
+  if (typeof parsed.lastDowntimeAlertAt === "string") {
+    state.lastDowntimeAlertAt = parsed.lastDowntimeAlertAt;
+  }
+  if (typeof parsed.lastRecoveryFailureAlertAt === "string") {
+    state.lastRecoveryFailureAlertAt = parsed.lastRecoveryFailureAlertAt;
   }
 
   return state;
@@ -75,6 +87,34 @@ export function readEvents(dataDir: string): LogEvent[] {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as LogEvent);
+}
+
+export function writeSnapshot(dataDir: string, name: string, payload: unknown): void {
+  const snapshotDir = path.join(dataDir, "snapshots");
+  fs.mkdirSync(snapshotDir, { recursive: true });
+  fs.writeFileSync(path.join(snapshotDir, `${name}.json`), `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+export function readSnapshot<T>(dataDir: string, name: string): T | null {
+  const snapshotPath = path.join(dataDir, "snapshots", `${name}.json`);
+  if (!fs.existsSync(snapshotPath)) {
+    return null;
+  }
+
+  return JSON.parse(fs.readFileSync(snapshotPath, "utf8")) as T;
+}
+
+export function readUsageImports(dataDir: string, importDir: string): unknown[] {
+  const resolvedImportDir = path.resolve(importDir);
+  if (!fs.existsSync(resolvedImportDir)) {
+    fs.mkdirSync(resolvedImportDir, { recursive: true });
+    return [];
+  }
+
+  return fs
+    .readdirSync(resolvedImportDir)
+    .filter((entry) => entry.endsWith(".json"))
+    .map((entry) => JSON.parse(fs.readFileSync(path.join(resolvedImportDir, entry), "utf8")) as unknown);
 }
 
 function getStatePath(dataDir: string): string {

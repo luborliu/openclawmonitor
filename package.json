@@ -7,7 +7,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "npm run build -- --pretty false && node dist/index.js check",
+    "collect": "npm run build -- --pretty false && node dist/index.js collect",
+    "dashboard": "npm run build -- --pretty false && node dist/index.js dashboard",
     "report": "npm run build -- --pretty false && node dist/index.js report",
+    "service:install": "npm run build -- --pretty false && node dist/index.js service install",
+    "service:status": "npm run build -- --pretty false && node dist/index.js service status",
+    "service:uninstall": "npm run build -- --pretty false && node dist/index.js service uninstall",
     "start": "npm run build -- --pretty false && node dist/index.js watch"
   },
   "keywords": [

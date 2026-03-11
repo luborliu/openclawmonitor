@@ -4,6 +4,26 @@
   "recoveryCooldownMinutes": 15,
   "statusTimeoutMs": 10000,
   "dataDir": "./data",
+  "openclawBin": "/opt/homebrew/bin/openclaw",
+  "dashboardPort": 4317,
+  "usageImportDir": "./data/usage-imports",
+  "usageGatewayCategory": "gateway",
+  "notifications": {
+    "enabled": true,
+    "title": "OpenClaw Monitor",
+    "downtimeAlertMinutes": 15,
+    "repeatAlertMinutes": 30
+  },
+  "collectors": {
+    "probe": true,
+    "health": true,
+    "usageCost": true,
+    "usageCostDays": 30
+  },
+  "launchd": {
+    "label": "ai.openclaw.monitor",
+    "runAtLoad": true
+  },
   "recoverySteps": [
     "restart",
     "install",

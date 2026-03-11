@@ -2,6 +2,84 @@
 
 OpenClaw Monitor is a local reliability and observability tool for the OpenClaw gateway. It now covers automatic health checks, recovery, collector snapshots, launchd scheduling, notifications, and a small local dashboard.
 
+## Quick start
+
+### 1. Install dependencies
+
+```bash
+npm install
+npm run build
+```
+
+### 2. Review the config
+
+Default config: `openclawmonitor.config.json`
+
+Important fields:
+
+- `checkIntervalMinutes`: how often the monitor runs
+- `failureThreshold`: how many failed checks before recovery starts
+- `recoverySteps`: the commands to run for recovery
+- `openclawBin`: absolute path to the OpenClaw CLI for `launchd`
+- `dashboardPort`: local dashboard port
+
+### 3. Run one health check manually
+
+```bash
+npm run check
+```
+
+This will:
+
+- run `openclaw gateway status --json`
+- decide whether the gateway is healthy
+- trigger recovery if the failure threshold is already reached
+- write logs into `data/`
+
+### 4. Collect extra snapshots
+
+```bash
+npm run collect
+```
+
+This saves:
+
+- gateway `probe`
+- gateway `health`
+- gateway `usage-cost`
+
+into `data/snapshots/`.
+
+### 5. Open the local dashboard
+
+```bash
+npm run dashboard
+```
+
+Then open [http://127.0.0.1:4317](http://127.0.0.1:4317).
+
+### 6. Install the background service on macOS
+
+```bash
+npm run service:install
+npm run service:status
+```
+
+This installs a `launchd` agent that runs the monitor every `checkIntervalMinutes`.
+
+### 7. Check what happened
+
+```bash
+npm run report
+```
+
+Useful files:
+
+- `data/events.jsonl`: event history
+- `data/state.json`: current monitor state
+- `data/launchd.out.log`: background service output
+- `data/launchd.err.log`: background service errors
+
 ## What it does today
 
 - Runs `openclaw gateway status --json` to verify the service and RPC probe.

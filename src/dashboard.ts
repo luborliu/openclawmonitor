@@ -779,9 +779,15 @@ function renderHtml(): string {
       }
       .controls-grid {
         display: grid;
-        grid-template-columns: 1.1fr 0.9fr;
+        grid-template-columns: 1fr;
         gap: 14px;
         margin-bottom: 14px;
+      }
+      .controls-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
       }
       .field-grid {
         display: grid;
@@ -810,27 +816,55 @@ function renderHtml(): string {
       }
       .filter-row {
         display: grid;
-        grid-template-columns: 140px 180px 1fr auto;
+        grid-template-columns: 140px 180px 1fr;
         gap: 10px;
         align-items: end;
         margin-bottom: 12px;
       }
-      .check-strip {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(10px, 1fr));
-        gap: 6px;
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.34);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        z-index: 30;
       }
-      .check-cell {
-        height: 34px;
-        border-radius: 10px;
-        border: 1px solid rgba(18,34,41,0.06);
-        background: #d1d5db;
+      .modal-backdrop.open {
+        display: flex;
       }
-      .check-cell.up {
-        background: linear-gradient(180deg, #22c55e, #15803d);
+      .modal {
+        width: min(760px, 100%);
+        background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(243,247,246,0.98));
+        border: 1px solid rgba(18,34,41,0.08);
+        border-radius: 26px;
+        box-shadow: 0 24px 70px rgba(15, 23, 42, 0.18);
+        padding: 20px;
       }
-      .check-cell.down {
-        background: linear-gradient(180deg, #fb7185, #b91c1c);
+      .modal-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+      }
+      .close-button {
+        border: 1px solid rgba(18,34,41,0.1);
+        background: white;
+        border-radius: 999px;
+        padding: 8px 12px;
+        cursor: pointer;
+        font: 600 11px/1 "SF Mono", "Menlo", monospace;
+      }
+      .availability-wrap {
+        position: relative;
+      }
+      .availability-axis {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 8px;
+        color: var(--muted);
+        font: 600 10px/1.2 "SF Mono", "Menlo", monospace;
       }
       .bar-stack {
         display: grid;
@@ -866,29 +900,10 @@ function renderHtml(): string {
         font: 600 10px/1.2 "SF Mono", "Menlo", monospace;
         text-align: center;
       }
-      .usage-bars {
-        display: grid;
-        gap: 10px;
-      }
-      .usage-day {
-        display: grid;
-        grid-template-columns: 84px 1fr auto;
-        gap: 10px;
-        align-items: center;
-      }
-      .usage-track {
-        position: relative;
-        height: 16px;
-        border-radius: 999px;
-        background: rgba(18,34,41,0.06);
-        overflow: hidden;
-      }
-      .usage-fill {
-        position: absolute;
-        left: 0;
-        top: 0;
-        bottom: 0;
-        border-radius: 999px;
+      .chart-svg {
+        width: 100%;
+        height: 240px;
+        display: block;
       }
       .chart-legend {
         display: flex;
@@ -937,30 +952,13 @@ function renderHtml(): string {
 
       <section class="controls-grid">
         <div class="panel">
-          <div class="metric">Monitor settings</div>
-          <div class="label">Update the watchdog loop and recovery thresholds from the dashboard. Saving also reloads the launchd schedule on macOS.</div>
-          <div class="field-grid">
-            <div class="field">
-              <label for="checkIntervalMinutes">Check interval (minutes)</label>
-              <input id="checkIntervalMinutes" type="number" min="1" max="1440" />
+          <div class="controls-head">
+            <div>
+              <div class="metric">Monitor controls</div>
+              <div class="label">Open config overrides only when you need them, to keep the dashboard compact.</div>
             </div>
-            <div class="field">
-              <label for="failureThreshold">Failure threshold</label>
-              <input id="failureThreshold" type="number" min="1" max="20" />
-            </div>
-            <div class="field">
-              <label for="recoveryCooldownMinutes">Recovery cooldown (minutes)</label>
-              <input id="recoveryCooldownMinutes" type="number" min="0" max="1440" />
-            </div>
-            <div class="field">
-              <label for="statusTimeoutMs">Status timeout (ms)</label>
-              <input id="statusTimeoutMs" type="number" min="1000" max="120000" step="1000" />
-            </div>
+            <button class="action-button secondary" id="openConfig" type="button">Override config</button>
           </div>
-          <div class="action-row" style="margin-top:12px;">
-            <button class="action-button" id="saveConfig" type="button">Save settings</button>
-          </div>
-          <div class="action-result" id="configResult"></div>
         </div>
         <div class="action-panel">
           <div class="metric">Quick actions</div>
@@ -978,9 +976,9 @@ function renderHtml(): string {
             <div class="mini-grid" id="secondary"></div>
           </div>
           <div class="panel">
-            <div class="metric">Recent check sequence</div>
+            <div class="metric">Availability trend</div>
             <div class="chart-shell" id="healthTimeline"></div>
-            <div class="chart-help">Each block is one recent health check in local time order. Green means up. Red means down. Hover a block for the exact timestamp and result.</div>
+            <div class="chart-help">Line view of recent checks. High means healthy, low means unhealthy. Hover any point for the exact local timestamp and result.</div>
           </div>
           <div class="panel">
             <div class="metric">Daily usage cost</div>
@@ -1029,7 +1027,6 @@ function renderHtml(): string {
             <label for="queryFilter">Message search</label>
             <input id="queryFilter" type="text" placeholder="Search event type or message" />
           </div>
-          <button class="action-button secondary" id="applyFilters" type="button">Apply filters</button>
         </div>
         <div class="events-toolbar">
           <div>
@@ -1047,6 +1044,39 @@ function renderHtml(): string {
     </main>
 
     <div id="tooltip" class="tooltip"></div>
+    <div id="configModal" class="modal-backdrop">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <div class="metric">Config override</div>
+            <div class="label">Save monitor settings and reload the launchd schedule on macOS.</div>
+          </div>
+          <button class="close-button" id="closeConfig" type="button">Close</button>
+        </div>
+        <div class="field-grid">
+          <div class="field">
+            <label for="checkIntervalMinutes">Check interval (minutes)</label>
+            <input id="checkIntervalMinutes" type="number" min="1" max="1440" />
+          </div>
+          <div class="field">
+            <label for="failureThreshold">Failure threshold</label>
+            <input id="failureThreshold" type="number" min="1" max="20" />
+          </div>
+          <div class="field">
+            <label for="recoveryCooldownMinutes">Recovery cooldown (minutes)</label>
+            <input id="recoveryCooldownMinutes" type="number" min="0" max="1440" />
+          </div>
+          <div class="field">
+            <label for="statusTimeoutMs">Status timeout (ms)</label>
+            <input id="statusTimeoutMs" type="number" min="1000" max="120000" step="1000" />
+          </div>
+        </div>
+        <div class="action-row" style="margin-top:12px;">
+          <button class="action-button" id="saveConfig" type="button">Save settings</button>
+        </div>
+        <div class="action-result" id="configResult"></div>
+      </div>
+    </div>
 
     <script>
       const money = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" });
@@ -1076,6 +1106,7 @@ function renderHtml(): string {
       let actionBusy = false;
       let configBusy = false;
       const eventFilters = { level: "", type: "", q: "" };
+      let filterTimer = null;
 
       const tooltip = document.getElementById("tooltip");
       document.addEventListener("mouseover", (event) => {
@@ -1097,13 +1128,17 @@ function renderHtml(): string {
 
       document.getElementById("prevPage").addEventListener("click", () => loadEvents(Math.max(1, currentPage - 1)));
       document.getElementById("nextPage").addEventListener("click", () => loadEvents(Math.min(totalPages, currentPage + 1)));
-      document.getElementById("applyFilters").addEventListener("click", () => {
-        eventFilters.level = document.getElementById("levelFilter").value;
-        eventFilters.type = document.getElementById("typeFilter").value;
-        eventFilters.q = document.getElementById("queryFilter").value.trim();
-        loadEvents(1);
-      });
+      document.getElementById("levelFilter").addEventListener("change", queueFilterUpdate);
+      document.getElementById("typeFilter").addEventListener("change", queueFilterUpdate);
+      document.getElementById("queryFilter").addEventListener("input", queueFilterUpdate);
       document.getElementById("saveConfig").addEventListener("click", saveSettings);
+      document.getElementById("openConfig").addEventListener("click", () => document.getElementById("configModal").classList.add("open"));
+      document.getElementById("closeConfig").addEventListener("click", () => document.getElementById("configModal").classList.remove("open"));
+      document.getElementById("configModal").addEventListener("click", (event) => {
+        if (event.target.id === "configModal") {
+          document.getElementById("configModal").classList.remove("open");
+        }
+      });
 
       refreshDashboard({ page: 1, resetTimer: true });
 
@@ -1242,6 +1277,9 @@ function renderHtml(): string {
           .then((response) => response.json())
           .then((result) => {
             document.getElementById("configResult").textContent = result.ok ? result.message : "Save failed: " + (result.error || "unknown error");
+            if (result.ok) {
+              document.getElementById("configModal").classList.remove("open");
+            }
             return refreshDashboard({ page: currentPage || 1, resetTimer: true });
           })
           .finally(() => {
@@ -1322,17 +1360,42 @@ function renderHtml(): string {
         return "<article class='panel'><div class='metric'>" + metric + "</div><div class='value'>" + value + "</div><div class='label'>" + label + "</div></article>";
       }
 
+      function queueFilterUpdate() {
+        eventFilters.level = document.getElementById("levelFilter").value;
+        eventFilters.type = document.getElementById("typeFilter").value;
+        eventFilters.q = document.getElementById("queryFilter").value.trim();
+        if (filterTimer) {
+          window.clearTimeout(filterTimer);
+        }
+        filterTimer = window.setTimeout(() => loadEvents(1), 220);
+      }
+
       function miniCard(label, value) {
         return "<article class='mini-card'><div class='mini-title'>" + label + "</div><div class='mini-value'>" + value + "</div></article>";
       }
 
       function renderHealthTimeline(points) {
         if (!points.length) return emptyChart("No health data yet");
-        return "<div class='check-strip'>" + points.map((point) => {
-          const tooltip = "<strong>" + formatDateTime(point.bucket) + "</strong><br>" + (point.value === 1 ? "Healthy" : "Unhealthy") + "<br>" + (point.annotation || "");
-          return "<div class='check-cell " + (point.value === 1 ? "up" : "down") + "' data-tip='" + escapeAttr(tooltip) + "'></div>";
-        }).join("") + "</div>" +
-          "<div class='chart-legend'><span><i style='background:#15803d'></i>Healthy check</span><span><i style='background:#b91c1c'></i>Unhealthy check</span></div>";
+        const width = 760;
+        const height = 220;
+        const xStep = points.length === 1 ? 0 : (width - 42) / (points.length - 1);
+        const coords = points.map((point, index) => {
+          const x = 22 + index * xStep;
+          const y = point.value === 1 ? 34 : height - 42;
+          return { x, y, point };
+        });
+        const polyline = coords.map((coord) => coord.x + "," + coord.y).join(" ");
+        return "<div class='availability-wrap'><svg class='chart-svg' viewBox='0 0 " + width + " " + height + "' preserveAspectRatio='none'>" +
+          "<line x1='22' y1='34' x2='" + (width - 18) + "' y2='34' stroke='rgba(18,34,41,0.08)' stroke-dasharray='4 6'></line>" +
+          "<line x1='22' y1='" + (height - 42) + "' x2='" + (width - 18) + "' y2='" + (height - 42) + "' stroke='rgba(18,34,41,0.08)' stroke-dasharray='4 6'></line>" +
+          "<polyline points='" + polyline + "' fill='none' stroke='#2563eb' stroke-width='4' stroke-linejoin='round' stroke-linecap='round'></polyline>" +
+          coords.map((coord) => {
+            const tooltip = "<strong>" + formatDateTime(coord.point.bucket) + "</strong><br>" + (coord.point.value === 1 ? "Healthy" : "Unhealthy") + "<br>" + (coord.point.annotation || "");
+            const fill = coord.point.value === 1 ? "#15803d" : "#b91c1c";
+            return "<circle data-tip='" + escapeAttr(tooltip) + "' cx='" + coord.x + "' cy='" + coord.y + "' r='5' fill='" + fill + "' stroke='white' stroke-width='2'></circle>";
+          }).join("") +
+          "</svg><div class='availability-axis'><span>Down</span><span>Recent checks</span><span>Up</span></div></div>" +
+          "<div class='chart-legend'><span><i style='background:#2563eb'></i>Availability line</span><span><i style='background:#15803d'></i>Healthy point</span><span><i style='background:#b91c1c'></i>Unhealthy point</span></div>";
       }
 
       function renderRecoveryBars(points) {
@@ -1374,11 +1437,21 @@ function renderHtml(): string {
         }
         const items = Array.from(merged.entries()).map(([bucket, value]) => ({ bucket, value }));
         const max = Math.max(...items.map((item) => item.value), 1);
-        return "<div class='usage-bars'>" + items.map((item) => {
-          const width = Math.max(4, (item.value / max) * 100);
-          const tooltip = "<strong>" + formatShortDate(item.bucket) + "</strong><br>Total cost: " + money.format(item.value);
-          return "<div class='usage-day' data-tip='" + escapeAttr(tooltip) + "'><div class='bar-label' style='text-align:left;'>" + formatShortDate(item.bucket) + "</div><div class='usage-track'><div class='usage-fill' style='width:" + width + "%; background:linear-gradient(90deg,#0f766e,#2563eb);'></div></div><div class='bar-label'>" + money.format(item.value) + "</div></div>";
-        }).join("") + "</div>";
+        const width = 760;
+        const height = 240;
+        const slot = (width - 44) / items.length;
+        const barWidth = Math.max(16, slot - 10);
+        return "<svg class='chart-svg' viewBox='0 0 " + width + " " + height + "' preserveAspectRatio='none'>" +
+          items.map((item, index) => {
+            const x = 24 + index * slot;
+            const barHeight = (item.value / max) * 164;
+            const y = height - 46 - barHeight;
+            const tooltip = "<strong>" + formatShortDate(item.bucket) + "</strong><br>Total cost: " + money.format(item.value);
+            return "<g><rect data-tip='" + escapeAttr(tooltip) + "' x='" + x + "' y='" + y + "' width='" + barWidth + "' height='" + barHeight + "' rx='10' fill='url(#usageGradient)'></rect>" +
+              "<text x='" + (x + barWidth / 2) + "' y='" + (height - 18) + "' text-anchor='middle' fill='#5e6f77' font-size='10'>" + formatShortDate(item.bucket) + "</text></g>";
+          }).join("") +
+          "<defs><linearGradient id='usageGradient' x1='0' x2='0' y1='0' y2='1'><stop offset='0%' stop-color='#2563eb'/><stop offset='100%' stop-color='#0f766e'/></linearGradient></defs>" +
+          "</svg>";
       }
 
       function emptyChart(label) {

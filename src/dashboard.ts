@@ -887,14 +887,14 @@ function renderHtml(): string {
         color: var(--muted);
         font: 600 10px/1.2 "SF Mono", "Menlo", monospace;
       }
-      .availability-controls {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
+      .availability-toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
         margin-top: 12px;
       }
       .availability-window {
-        margin-top: 8px;
         color: var(--muted);
         font: 600 11px/1.4 "SF Mono", "Menlo", monospace;
       }
@@ -962,7 +962,7 @@ function renderHtml(): string {
         .mini-grid { grid-template-columns: 1fr; }
         .topbar { grid-template-columns: 1fr; }
         .filter-row { grid-template-columns: 1fr; }
-        .availability-controls { grid-template-columns: 1fr; }
+        .availability-toolbar { flex-direction: column; align-items: flex-start; }
       }
       @media (max-width: 640px) {
         .grid { grid-template-columns: 1fr; }
@@ -1001,18 +1001,11 @@ function renderHtml(): string {
           <div class="panel">
             <div class="metric">Availability trend</div>
             <div class="chart-shell" id="healthTimeline"></div>
-            <div class="availability-controls">
-              <div class="field">
-                <label for="availabilityStart">Range start</label>
-                <input id="availabilityStart" type="range" min="0" max="0" value="0" />
-              </div>
-              <div class="field">
-                <label for="availabilityEnd">Range end</label>
-                <input id="availabilityEnd" type="range" min="1" max="1" value="1" />
-              </div>
+            <div class="availability-toolbar">
+              <div class="availability-window" id="availabilityWindow"></div>
+              <button class="action-button secondary" id="resetAvailabilityZoom" type="button">Reset zoom</button>
             </div>
-            <div class="availability-window" id="availabilityWindow"></div>
-            <div class="chart-help">Line view of recent checks with a selectable window. High means healthy, low means unhealthy. Hover any point for the exact local timestamp and result.</div>
+            <div class="chart-help">Drag across the graph to zoom into a portion of time. High means healthy, low means unhealthy. Hover any point for the exact local timestamp and result.</div>
           </div>
           <div class="panel">
             <div class="metric">Daily usage cost</div>
@@ -1142,8 +1135,7 @@ function renderHtml(): string {
       const eventFilters = { level: "", type: "", q: "" };
       let filterTimer = null;
       let healthPoints = [];
-      let availabilityStartIndex = 0;
-      let availabilityEndIndex = 0;
+      let availabilityZoom = null;
 
       const tooltip = document.getElementById("tooltip");
       document.addEventListener("mouseover", (event) => {
@@ -1175,8 +1167,10 @@ function renderHtml(): string {
           document.getElementById("configModal").classList.remove("open");
         }
       });
-      document.getElementById("availabilityStart").addEventListener("input", () => updateAvailabilityWindow("start"));
-      document.getElementById("availabilityEnd").addEventListener("input", () => updateAvailabilityWindow("end"));
+      document.getElementById("resetAvailabilityZoom").addEventListener("click", () => {
+        availabilityZoom = null;
+        renderAvailabilityChart();
+      });
 
       refreshDashboard({ page: 1, resetTimer: true });
 
@@ -1206,7 +1200,7 @@ function renderHtml(): string {
 
         document.getElementById("secondary").innerHTML = [
           miniCard("Sessions", number.format(overview.sessionCount || 0)),
-          miniCard("Linked channels", number.format(overview.linkedChannels || 0)),
+          miniCard("Connected channels", (overview.connectedChannels || 0) + " of " + (overview.linkedChannels || 0)),
           miniCard("Collector snapshots", formatDateTime(data.latest?.healthCollectedAt || data.generatedAt))
         ].join("");
 
@@ -1223,7 +1217,6 @@ function renderHtml(): string {
         });
 
         healthPoints = data.charts?.healthTimeline || [];
-        syncAvailabilityControls();
         renderAvailabilityChart();
         document.getElementById("recoveryBars").innerHTML = renderRecoveryBars(data.charts?.recoveryCadence || []);
         document.getElementById("eventActivity").innerHTML = renderEventActivity(data.charts?.eventActivity || []);
@@ -1413,46 +1406,17 @@ function renderHtml(): string {
         filterTimer = window.setTimeout(() => loadEvents(1), 220);
       }
 
-      function syncAvailabilityControls() {
-        const startInput = document.getElementById("availabilityStart");
-        const endInput = document.getElementById("availabilityEnd");
-        const maxIndex = Math.max(0, healthPoints.length - 1);
-        startInput.max = String(maxIndex);
-        endInput.max = String(maxIndex);
-        if (availabilityEndIndex === 0 || availabilityEndIndex > maxIndex) {
-          availabilityEndIndex = maxIndex;
-        }
-        if (availabilityStartIndex > availabilityEndIndex) {
-          availabilityStartIndex = Math.max(0, availabilityEndIndex - Math.min(11, maxIndex));
-        }
-        startInput.value = String(availabilityStartIndex);
-        endInput.value = String(availabilityEndIndex);
-      }
-
-      function updateAvailabilityWindow(source) {
-        const startInput = document.getElementById("availabilityStart");
-        const endInput = document.getElementById("availabilityEnd");
-        availabilityStartIndex = Number(startInput.value);
-        availabilityEndIndex = Number(endInput.value);
-        if (availabilityStartIndex > availabilityEndIndex) {
-          if (source === "start") {
-            availabilityEndIndex = availabilityStartIndex;
-            endInput.value = String(availabilityEndIndex);
-          } else {
-            availabilityStartIndex = availabilityEndIndex;
-            startInput.value = String(availabilityStartIndex);
-          }
-        }
-        renderAvailabilityChart();
-      }
-
       function renderAvailabilityChart() {
-        const visible = healthPoints.slice(availabilityStartIndex, availabilityEndIndex + 1);
+        const visible = availabilityZoom
+          ? healthPoints.slice(availabilityZoom.start, availabilityZoom.end + 1)
+          : healthPoints;
         document.getElementById("healthTimeline").innerHTML = renderHealthTimeline(visible);
         document.getElementById("availabilityWindow").textContent =
           visible.length > 0
             ? "Showing " + formatDateTime(visible[0].bucket) + " to " + formatDateTime(visible[visible.length - 1].bucket)
             : "No checks in selected range";
+        document.getElementById("resetAvailabilityZoom").disabled = !availabilityZoom;
+        attachAvailabilityBrush(visible);
       }
 
       function miniCard(label, value) {
@@ -1470,7 +1434,7 @@ function renderHtml(): string {
           return { x, y, point };
         });
         const polyline = coords.map((coord) => coord.x + "," + coord.y).join(" ");
-        return "<div class='availability-wrap'><svg class='chart-svg' viewBox='0 0 " + width + " " + height + "' preserveAspectRatio='none'>" +
+        return "<div class='availability-wrap'><svg id='availabilitySvg' class='chart-svg' viewBox='0 0 " + width + " " + height + "' preserveAspectRatio='none'>" +
           "<line x1='22' y1='34' x2='" + (width - 18) + "' y2='34' stroke='rgba(18,34,41,0.08)' stroke-dasharray='4 6'></line>" +
           "<line x1='22' y1='" + (height - 42) + "' x2='" + (width - 18) + "' y2='" + (height - 42) + "' stroke='rgba(18,34,41,0.08)' stroke-dasharray='4 6'></line>" +
           "<polyline points='" + polyline + "' fill='none' stroke='#2563eb' stroke-width='4' stroke-linejoin='round' stroke-linecap='round'></polyline>" +
@@ -1479,8 +1443,94 @@ function renderHtml(): string {
             const fill = coord.point.value === 1 ? "#15803d" : "#b91c1c";
             return "<circle data-tip='" + escapeAttr(tooltip) + "' cx='" + coord.x + "' cy='" + coord.y + "' r='5' fill='" + fill + "' stroke='white' stroke-width='2'></circle>";
           }).join("") +
+          "<rect id='availabilityBrushSurface' x='22' y='18' width='" + (width - 40) + "' height='" + (height - 52) + "' fill='transparent'></rect>" +
+          "<rect id='availabilityBrushRect' x='0' y='18' width='0' height='" + (height - 52) + "' fill='rgba(37,99,235,0.16)' stroke='rgba(37,99,235,0.6)' stroke-dasharray='6 4' style='display:none;'></rect>" +
           "</svg><div class='availability-axis'><span>" + formatShortDate(points[0].bucket) + "</span><span>Recent checks</span><span>" + formatShortDate(points[points.length - 1].bucket) + "</span></div></div>" +
           "<div class='chart-legend'><span><i style='background:#2563eb'></i>Availability line</span><span><i style='background:#15803d'></i>Healthy point</span><span><i style='background:#b91c1c'></i>Unhealthy point</span></div>";
+      }
+
+      function attachAvailabilityBrush(visiblePoints) {
+        const svg = document.getElementById("availabilitySvg");
+        const surface = document.getElementById("availabilityBrushSurface");
+        const brushRect = document.getElementById("availabilityBrushRect");
+        if (!svg || !surface || !brushRect || visiblePoints.length < 2) {
+          return;
+        }
+
+        const minX = 22;
+        const maxX = 742;
+        let dragStartX = null;
+
+        surface.onmousedown = (event) => {
+          dragStartX = clampX(toSvgX(svg, event), minX, maxX);
+          brushRect.setAttribute("x", String(dragStartX));
+          brushRect.setAttribute("width", "0");
+          brushRect.style.display = "block";
+        };
+
+        surface.onmousemove = (event) => {
+          if (dragStartX === null) {
+            return;
+          }
+          const currentX = clampX(toSvgX(svg, event), minX, maxX);
+          const left = Math.min(dragStartX, currentX);
+          const width = Math.abs(currentX - dragStartX);
+          brushRect.setAttribute("x", String(left));
+          brushRect.setAttribute("width", String(width));
+        };
+
+        surface.onmouseup = (event) => {
+          if (dragStartX === null) {
+            return;
+          }
+          const currentX = clampX(toSvgX(svg, event), minX, maxX);
+          finalizeBrush(dragStartX, currentX, visiblePoints);
+          dragStartX = null;
+          brushRect.style.display = "none";
+        };
+
+        surface.onmouseleave = () => {
+          if (dragStartX === null) {
+            return;
+          }
+          dragStartX = null;
+          brushRect.style.display = "none";
+        };
+      }
+
+      function finalizeBrush(startX, endX, visiblePoints) {
+        if (Math.abs(endX - startX) < 18) {
+          return;
+        }
+
+        const minIndex = pointIndexFromX(Math.min(startX, endX), visiblePoints.length);
+        const maxIndex = pointIndexFromX(Math.max(startX, endX), visiblePoints.length);
+        const startPoint = visiblePoints[minIndex];
+        const endPoint = visiblePoints[maxIndex];
+        const globalStart = healthPoints.findIndex((point) => point.bucket === startPoint.bucket);
+        const globalEnd = healthPoints.findIndex((point) => point.bucket === endPoint.bucket);
+        if (globalStart >= 0 && globalEnd >= globalStart) {
+          availabilityZoom = { start: globalStart, end: globalEnd };
+          renderAvailabilityChart();
+        }
+      }
+
+      function toSvgX(svg, event) {
+        const rect = svg.getBoundingClientRect();
+        const scale = 760 / rect.width;
+        return (event.clientX - rect.left) * scale;
+      }
+
+      function pointIndexFromX(x, length) {
+        if (length <= 1) {
+          return 0;
+        }
+        const ratio = (x - 22) / (742 - 22);
+        return Math.max(0, Math.min(length - 1, Math.round(ratio * (length - 1))));
+      }
+
+      function clampX(value, min, max) {
+        return Math.max(min, Math.min(max, value));
       }
 
       function renderRecoveryBars(points) {

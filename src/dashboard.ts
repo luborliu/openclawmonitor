@@ -462,6 +462,9 @@ function renderHtml(): string {
         color: var(--muted);
         font: 600 12px/1.4 "SF Mono", "Menlo", monospace;
       }
+      .meta strong {
+        color: var(--ink);
+      }
       .action-row {
         display: flex;
         gap: 10px;
@@ -766,6 +769,11 @@ function renderHtml(): string {
 
       let currentPage = 1;
       let totalPages = 1;
+      let refreshIntervalSeconds = 30;
+      let refreshCountdown = refreshIntervalSeconds;
+      let refreshTimer = null;
+      let refreshBusy = false;
+      let actionBusy = false;
 
       const tooltip = document.getElementById("tooltip");
       document.addEventListener("mouseover", (event) => {
@@ -788,17 +796,13 @@ function renderHtml(): string {
       document.getElementById("prevPage").addEventListener("click", () => loadEvents(Math.max(1, currentPage - 1)));
       document.getElementById("nextPage").addEventListener("click", () => loadEvents(Math.min(totalPages, currentPage + 1)));
 
-      Promise.all([fetch("/api/summary").then((response) => response.json()), loadEvents(1)]).then(([summary]) => {
-        renderSummary(summary);
-      });
+      refreshDashboard({ page: 1, resetTimer: true });
 
       function renderSummary(data) {
         const overview = data.overview || {};
         const degraded = (data.state?.consecutiveFailures || 0) > 0;
 
-        document.getElementById("meta").textContent =
-          "Local zone: " + (data.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone) +
-          " | Last refresh: " + formatDateTime(data.generatedAt);
+        updateMeta(data.generatedAt, data.timezone);
 
         document.getElementById("summary").innerHTML = [
           metricCard("Gateway", degraded ? "Degraded" : "Healthy", degraded ? data.state.consecutiveFailures + " failed checks in a row" : "No active failure streak"),
@@ -871,6 +875,7 @@ function renderHtml(): string {
 
       function runAction(action, button) {
         if (!action) return;
+        actionBusy = true;
         button.disabled = true;
         document.getElementById("actionResult").textContent = "Running " + action + "...";
         fetch("/api/actions", {
@@ -889,12 +894,78 @@ function renderHtml(): string {
                 ].filter(Boolean)
               : ["Action failed: " + (payload.error || "unknown error")];
             document.getElementById("actionResult").textContent = lines.join("\\n");
-            return Promise.all([fetch("/api/summary").then((response) => response.json()), loadEvents(1)]);
+            return refreshDashboard({ page: 1, resetTimer: true });
           })
-          .then(([summary]) => renderSummary(summary))
           .finally(() => {
+            actionBusy = false;
             button.disabled = false;
           });
+      }
+
+      function refreshDashboard(options = {}) {
+        if (refreshBusy || actionBusy) {
+          return Promise.resolve();
+        }
+
+        refreshBusy = true;
+        const page = options.page || currentPage || 1;
+        return Promise.all([
+          fetch("/api/summary").then((response) => response.json()),
+          loadEvents(page)
+        ])
+          .then(([summary]) => {
+            renderSummary(summary);
+            if (options.resetTimer) {
+              resetRefreshTimer();
+            }
+          })
+          .finally(() => {
+            refreshBusy = false;
+          });
+      }
+
+      function resetRefreshTimer() {
+        refreshCountdown = refreshIntervalSeconds;
+        updateMeta();
+      }
+
+      function ensureRefreshTimer() {
+        if (refreshTimer) {
+          return;
+        }
+
+        refreshTimer = window.setInterval(() => {
+          if (actionBusy) {
+            updateMeta();
+            return;
+          }
+
+          refreshCountdown = Math.max(0, refreshCountdown - 1);
+          updateMeta();
+
+          if (refreshCountdown === 0) {
+            refreshDashboard({ page: currentPage || 1, resetTimer: true });
+          }
+        }, 1000);
+      }
+
+      function updateMeta(generatedAtValue, timezoneValue) {
+        const existingGeneratedAt = generatedAtValue || document.body.dataset.generatedAt || "";
+        const existingTimezone = timezoneValue || document.body.dataset.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (generatedAtValue) {
+          document.body.dataset.generatedAt = generatedAtValue;
+        }
+        if (timezoneValue) {
+          document.body.dataset.timezone = timezoneValue;
+        }
+
+        const stateText = actionBusy
+          ? "auto-refresh paused during action"
+          : "next refresh in " + refreshCountdown + "s";
+        document.getElementById("meta").innerHTML =
+          "Local zone: <strong>" + existingTimezone + "</strong>" +
+          " | Last refresh: <strong>" + formatDateTime(existingGeneratedAt) + "</strong>" +
+          " | " + stateText;
       }
 
       function metricCard(metric, value, label) {
@@ -1030,6 +1101,8 @@ function renderHtml(): string {
           .replaceAll("<", "&lt;")
           .replaceAll(">", "&gt;");
       }
+
+      ensureRefreshTimer();
     </script>
   </body>
 </html>`;

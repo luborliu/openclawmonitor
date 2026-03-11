@@ -46,9 +46,9 @@ interface EventPage {
   totalPages: number;
 }
 
-type DashboardAction = RecoveryStep | "check";
+type DashboardAction = Exclude<RecoveryStep, "install"> | "check";
 
-const ACTIONS: DashboardAction[] = ["check", "start", "stop", "restart", "install"];
+const ACTIONS: DashboardAction[] = ["check", "start", "stop", "restart"];
 
 export function startDashboardServer(options: RunOptions): http.Server {
   const server = http.createServer(async (request, response) => {
@@ -113,7 +113,10 @@ export function startDashboardServer(options: RunOptions): http.Server {
           const exitCode = await runCheck(options);
           stdout = `One-time health check finished with exit code ${exitCode}.`;
         } else {
-          const result = await runGatewayRecoveryStep(action as RecoveryStep, options.config.statusTimeoutMs);
+          const result = await runGatewayActionWithFallback(
+            action as Exclude<RecoveryStep, "install">,
+            options,
+          );
           stdout = result.stdout.trim();
           stderr = result.stderr.trim();
         }
@@ -294,6 +297,31 @@ function boundedNumber(value: unknown, fallback: number, min: number, max: numbe
   }
 
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+async function runGatewayActionWithFallback(
+  action: Exclude<RecoveryStep, "install">,
+  options: RunOptions,
+): Promise<{ stdout: string; stderr: string }> {
+  try {
+    return await runGatewayRecoveryStep(action, options.config.statusTimeoutMs);
+  } catch (error) {
+    if ((action === "start" || action === "restart") && shouldInstallFirst(error)) {
+      const installResult = await runGatewayRecoveryStep("install", options.config.statusTimeoutMs);
+      const retryResult = await runGatewayRecoveryStep(action, options.config.statusTimeoutMs);
+      return {
+        stdout: [installResult.stdout.trim(), retryResult.stdout.trim()].filter(Boolean).join("\n"),
+        stderr: [installResult.stderr.trim(), retryResult.stderr.trim()].filter(Boolean).join("\n"),
+      };
+    }
+    throw error;
+  }
+}
+
+function shouldInstallFirst(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  return normalized.includes("service not loaded") || normalized.includes("start with: openclaw gateway install");
 }
 
 function loadUsageSources(dataDir: string, usageImportDir: string): UsageSource[] {
@@ -955,9 +983,9 @@ function renderHtml(): string {
           <div class="controls-head">
             <div>
               <div class="metric">Monitor controls</div>
-              <div class="label">Open config overrides only when you need them, to keep the dashboard compact.</div>
+              <div class="label">Use quick actions for checks, restarts, and config override.</div>
             </div>
-            <button class="action-button secondary" id="openConfig" type="button">Override config</button>
+            <div class="muted">Start and restart will auto-install the gateway service if needed.</div>
           </div>
         </div>
         <div class="action-panel">
@@ -1132,7 +1160,6 @@ function renderHtml(): string {
       document.getElementById("typeFilter").addEventListener("change", queueFilterUpdate);
       document.getElementById("queryFilter").addEventListener("input", queueFilterUpdate);
       document.getElementById("saveConfig").addEventListener("click", saveSettings);
-      document.getElementById("openConfig").addEventListener("click", () => document.getElementById("configModal").classList.add("open"));
       document.getElementById("closeConfig").addEventListener("click", () => document.getElementById("configModal").classList.remove("open"));
       document.getElementById("configModal").addEventListener("click", (event) => {
         if (event.target.id === "configModal") {
@@ -1173,12 +1200,15 @@ function renderHtml(): string {
         ].join("");
 
         document.getElementById("actions").innerHTML = (data.actions || []).map((action) => {
-          const secondary = action === "install" || action === "stop" ? " secondary" : "";
+          const secondary = action === "stop" ? " secondary" : "";
           const label = action === "check" ? "CHECK NOW" : action.toUpperCase();
           return "<button class='action-button" + secondary + "' data-action='" + action + "' type='button'>" + label + "</button>";
-        }).join("");
+        }).join("") + "<button class='action-button secondary' data-ui-action='config' type='button'>OVERRIDE CONFIG</button>";
         document.querySelectorAll("[data-action]").forEach((button) => {
           button.addEventListener("click", () => runAction(button.getAttribute("data-action"), button));
+        });
+        document.querySelectorAll("[data-ui-action='config']").forEach((button) => {
+          button.addEventListener("click", () => document.getElementById("configModal").classList.add("open"));
         });
 
         document.getElementById("healthTimeline").innerHTML = renderHealthTimeline(data.charts?.healthTimeline || []);

@@ -1,8 +1,9 @@
 import http from "node:http";
 import path from "node:path";
 
-import type { RecoveryStep } from "./config";
-import type { RunOptions } from "./monitor";
+import { saveConfig, type MonitorConfig, type RecoveryStep } from "./config";
+import { installLaunchdService } from "./launchd";
+import { runCheck, type RunOptions } from "./monitor";
 import {
   getGatewayHealth,
   runGatewayRecoveryStep,
@@ -43,7 +44,9 @@ interface EventPage {
   totalPages: number;
 }
 
-const ACTIONS: RecoveryStep[] = ["start", "stop", "restart", "install"];
+type DashboardAction = RecoveryStep | "check";
+
+const ACTIONS: DashboardAction[] = ["check", "start", "stop", "restart", "install"];
 
 export function startDashboardServer(options: RunOptions): http.Server {
   const server = http.createServer(async (request, response) => {
@@ -57,27 +60,67 @@ export function startDashboardServer(options: RunOptions): http.Server {
     if (request.method === "GET" && requestUrl.pathname === "/api/events") {
       const page = positiveInteger(requestUrl.searchParams.get("page"), 1);
       const pageSize = positiveInteger(requestUrl.searchParams.get("pageSize"), 12);
-      respondJson(response, buildEventPage(options, page, pageSize));
+      respondJson(
+        response,
+        buildEventPage(
+          options,
+          page,
+          pageSize,
+          requestUrl.searchParams.get("level"),
+          requestUrl.searchParams.get("type"),
+          requestUrl.searchParams.get("q"),
+        ),
+      );
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/config") {
+      const body = await readJsonBody(request);
+      try {
+        const updatedConfig = applyConfigPatch(options, body ?? {});
+        respondJson(response, {
+          ok: true,
+          config: buildUiConfig(updatedConfig),
+          message: "Configuration saved and launchd schedule reloaded.",
+        });
+      } catch (error) {
+        respondJson(
+          response,
+          {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          400,
+        );
+      }
       return;
     }
 
     if (request.method === "POST" && requestUrl.pathname === "/api/actions") {
       const body = await readJsonBody(request);
       const action = typeof body?.action === "string" ? body.action : "";
-      if (!ACTIONS.includes(action as RecoveryStep)) {
+      if (!ACTIONS.includes(action as DashboardAction)) {
         respondJson(response, { ok: false, error: "Unsupported action" }, 400);
         return;
       }
 
       try {
-        const result = await runGatewayRecoveryStep(action as RecoveryStep, options.config.statusTimeoutMs);
+        let stdout = "";
+        let stderr = "";
+        if (action === "check") {
+          const exitCode = await runCheck(options);
+          stdout = `One-time health check finished with exit code ${exitCode}.`;
+        } else {
+          const result = await runGatewayRecoveryStep(action as RecoveryStep, options.config.statusTimeoutMs);
+          stdout = result.stdout.trim();
+          stderr = result.stderr.trim();
+        }
         const health = await getGatewayHealth(options.config.statusTimeoutMs);
         respondJson(response, {
           ok: true,
           action,
-          command: result.command.join(" "),
-          stdout: result.stdout.trim(),
-          stderr: result.stderr.trim(),
+          stdout,
+          stderr,
           health: {
             ok: health.ok,
             summary: health.summary,
@@ -143,6 +186,7 @@ function buildDashboardData(options: RunOptions): Record<string, unknown> {
     generatedAt: new Date(now).toISOString(),
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     state,
+    config: buildUiConfig(options.config),
     overview: {
       uptime24h,
       checks24h: checks24h.length,
@@ -162,6 +206,7 @@ function buildDashboardData(options: RunOptions): Record<string, unknown> {
     },
     usageByCategory,
     actions: ACTIONS,
+    eventTypes: listEventTypes(allEvents),
     latest: {
       probeCollectedAt: probe?.collectedAt,
       healthCollectedAt: health?.collectedAt,
@@ -169,9 +214,26 @@ function buildDashboardData(options: RunOptions): Record<string, unknown> {
   };
 }
 
-function buildEventPage(options: RunOptions, page: number, pageSize: number): EventPage {
+function buildEventPage(
+  options: RunOptions,
+  page: number,
+  pageSize: number,
+  level: string | null,
+  type: string | null,
+  query: string | null,
+): EventPage {
   const dataDir = ensureDataDir(path.resolve(options.config.dataDir));
-  const items = readEvents(dataDir).slice().reverse();
+  const search = query?.trim().toLowerCase() ?? "";
+  const items = readEvents(dataDir)
+    .filter((event) => (level ? event.level === level : true))
+    .filter((event) => (type ? event.type === type : true))
+    .filter((event) =>
+      search.length > 0
+        ? `${event.type} ${event.level} ${event.message}`.toLowerCase().includes(search)
+        : true,
+    )
+    .slice()
+    .reverse();
   const total = items.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, totalPages);
@@ -185,6 +247,51 @@ function buildEventPage(options: RunOptions, page: number, pageSize: number): Ev
     total,
     totalPages,
   };
+}
+
+function listEventTypes(events: Array<{ type: string }>): string[] {
+  return Array.from(new Set(events.map((event) => event.type))).sort();
+}
+
+function buildUiConfig(config: MonitorConfig): Record<string, number> {
+  return {
+    checkIntervalMinutes: config.checkIntervalMinutes,
+    failureThreshold: config.failureThreshold,
+    recoveryCooldownMinutes: config.recoveryCooldownMinutes,
+    statusTimeoutMs: config.statusTimeoutMs,
+  };
+}
+
+function applyConfigPatch(options: RunOptions, payload: Record<string, unknown>): MonitorConfig {
+  const nextConfig: MonitorConfig = {
+    ...options.config,
+    checkIntervalMinutes: boundedNumber(payload.checkIntervalMinutes, options.config.checkIntervalMinutes, 1, 1440),
+    failureThreshold: boundedNumber(payload.failureThreshold, options.config.failureThreshold, 1, 20),
+    recoveryCooldownMinutes: boundedNumber(
+      payload.recoveryCooldownMinutes,
+      options.config.recoveryCooldownMinutes,
+      0,
+      1440,
+    ),
+    statusTimeoutMs: boundedNumber(payload.statusTimeoutMs, options.config.statusTimeoutMs, 1000, 120000),
+  };
+
+  saveConfig(options.configPath, nextConfig);
+  options.config = nextConfig;
+
+  if (process.platform === "darwin") {
+    void installLaunchdService(options);
+  }
+
+  return nextConfig;
+}
+
+function boundedNumber(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, Math.round(value)));
 }
 
 function loadUsageSources(dataDir: string, usageImportDir: string): UsageSource[] {
@@ -452,9 +559,8 @@ function renderHtml(): string {
         font-size: 1.05rem;
       }
       .topbar {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-end;
+        display: grid;
+        grid-template-columns: 1fr minmax(320px, 420px);
         gap: 18px;
         margin-top: 14px;
       }
@@ -469,6 +575,13 @@ function renderHtml(): string {
         display: flex;
         gap: 10px;
         flex-wrap: wrap;
+      }
+      .action-panel {
+        padding: 16px 18px;
+        border-radius: 22px;
+        background: var(--panel);
+        border: 1px solid rgba(255,255,255,0.66);
+        box-shadow: 0 18px 40px var(--shadow);
       }
       .action-button {
         border: 0;
@@ -663,12 +776,57 @@ function renderHtml(): string {
         font: 600 12px/1.5 "SF Mono", "Menlo", monospace;
         color: var(--muted);
         white-space: pre-wrap;
+        min-height: 54px;
+        padding: 12px;
+        border-radius: 16px;
+        background: rgba(255,255,255,0.6);
+        border: 1px solid var(--line);
+        overflow-wrap: anywhere;
+      }
+      .controls-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+      .field-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+      .field label {
+        color: var(--muted);
+        font: 600 11px/1.4 "SF Mono", "Menlo", monospace;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .field input, .field select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 10px 12px;
+        background: rgba(255,255,255,0.85);
+        color: var(--ink);
+        font: 500 14px/1.3 "Avenir Next", "Segoe UI", sans-serif;
+      }
+      .filter-row {
+        display: grid;
+        grid-template-columns: 140px 180px 1fr auto;
+        gap: 10px;
+        align-items: end;
+        margin-bottom: 12px;
       }
       @media (max-width: 1000px) {
         .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .layout { grid-template-columns: 1fr; }
         .mini-grid { grid-template-columns: 1fr; }
-        .topbar { flex-direction: column; align-items: flex-start; }
+        .topbar { grid-template-columns: 1fr; }
+        .controls-grid { grid-template-columns: 1fr; }
+        .filter-row { grid-template-columns: 1fr; }
       }
       @media (max-width: 640px) {
         .grid { grid-template-columns: 1fr; }
@@ -683,7 +841,8 @@ function renderHtml(): string {
         <div class="subtitle">Everything is shown in your local time zone. Hover charts for annotations, page through recent events, and trigger gateway actions directly from this dashboard.</div>
         <div class="topbar">
           <div class="meta" id="meta"></div>
-          <div>
+          <div class="action-panel">
+            <div class="metric">Quick actions</div>
             <div class="action-row" id="actions"></div>
             <div class="action-result" id="actionResult"></div>
           </div>
@@ -691,6 +850,35 @@ function renderHtml(): string {
       </section>
 
       <section id="summary" class="grid"></section>
+
+      <section class="controls-grid">
+        <div class="panel">
+          <div class="metric">Monitor settings</div>
+          <div class="label">Update the watchdog loop and recovery thresholds from the dashboard. Saving also reloads the launchd schedule on macOS.</div>
+          <div class="field-grid">
+            <div class="field">
+              <label for="checkIntervalMinutes">Check interval (minutes)</label>
+              <input id="checkIntervalMinutes" type="number" min="1" max="1440" />
+            </div>
+            <div class="field">
+              <label for="failureThreshold">Failure threshold</label>
+              <input id="failureThreshold" type="number" min="1" max="20" />
+            </div>
+            <div class="field">
+              <label for="recoveryCooldownMinutes">Recovery cooldown (minutes)</label>
+              <input id="recoveryCooldownMinutes" type="number" min="0" max="1440" />
+            </div>
+            <div class="field">
+              <label for="statusTimeoutMs">Status timeout (ms)</label>
+              <input id="statusTimeoutMs" type="number" min="1000" max="120000" step="1000" />
+            </div>
+          </div>
+          <div class="action-row" style="margin-top:12px;">
+            <button class="action-button" id="saveConfig" type="button">Save settings</button>
+          </div>
+          <div class="action-result" id="configResult"></div>
+        </div>
+      </section>
 
       <section class="layout">
         <div class="stack">
@@ -721,7 +909,7 @@ function renderHtml(): string {
           <div class="panel">
             <div class="metric">Event activity by type</div>
             <div class="chart-shell" id="eventActivity"></div>
-            <div class="chart-help">This replaces the old signal mix chart. It shows which kinds of monitor activity happened most often in the last 7 days, with plain-English descriptions on hover.</div>
+            <div class="chart-help">This shows which kinds of monitor activity happened most often in the last 7 days. Hover each bar for a plain-English explanation.</div>
           </div>
           <div class="panel">
             <div class="metric">Usage by category</div>
@@ -731,6 +919,28 @@ function renderHtml(): string {
       </section>
 
       <section class="panel" style="margin-top: 14px;">
+        <div class="filter-row">
+          <div class="field">
+            <label for="levelFilter">Level</label>
+            <select id="levelFilter">
+              <option value="">All levels</option>
+              <option value="info">Info</option>
+              <option value="warn">Warn</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="typeFilter">Type</label>
+            <select id="typeFilter">
+              <option value="">All types</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="queryFilter">Message search</label>
+            <input id="queryFilter" type="text" placeholder="Search event type or message" />
+          </div>
+          <button class="action-button secondary" id="applyFilters" type="button">Apply filters</button>
+        </div>
         <div class="events-toolbar">
           <div>
             <div class="metric">Recent events</div>
@@ -774,6 +984,8 @@ function renderHtml(): string {
       let refreshTimer = null;
       let refreshBusy = false;
       let actionBusy = false;
+      let configBusy = false;
+      const eventFilters = { level: "", type: "", q: "" };
 
       const tooltip = document.getElementById("tooltip");
       document.addEventListener("mouseover", (event) => {
@@ -795,6 +1007,13 @@ function renderHtml(): string {
 
       document.getElementById("prevPage").addEventListener("click", () => loadEvents(Math.max(1, currentPage - 1)));
       document.getElementById("nextPage").addEventListener("click", () => loadEvents(Math.min(totalPages, currentPage + 1)));
+      document.getElementById("applyFilters").addEventListener("click", () => {
+        eventFilters.level = document.getElementById("levelFilter").value;
+        eventFilters.type = document.getElementById("typeFilter").value;
+        eventFilters.q = document.getElementById("queryFilter").value.trim();
+        loadEvents(1);
+      });
+      document.getElementById("saveConfig").addEventListener("click", saveSettings);
 
       refreshDashboard({ page: 1, resetTimer: true });
 
@@ -830,7 +1049,8 @@ function renderHtml(): string {
 
         document.getElementById("actions").innerHTML = (data.actions || []).map((action) => {
           const secondary = action === "install" || action === "stop" ? " secondary" : "";
-          return "<button class='action-button" + secondary + "' data-action='" + action + "' type='button'>" + action.toUpperCase() + "</button>";
+          const label = action === "check" ? "CHECK NOW" : action.toUpperCase();
+          return "<button class='action-button" + secondary + "' data-action='" + action + "' type='button'>" + label + "</button>";
         }).join("");
         document.querySelectorAll("[data-action]").forEach((button) => {
           button.addEventListener("click", () => runAction(button.getAttribute("data-action"), button));
@@ -850,10 +1070,20 @@ function renderHtml(): string {
             return "<tr><td><span class='pill'>" + item.category + "</span></td><td>" + money.format(item.totalCost || 0) + "</td><td>" + number.format(item.totalTokens || 0) + "</td><td>" + number.format(item.sources || 0) + "</td></tr>";
           }).join("") +
           "</tbody>";
+
+        setConfigInputs(data.config || {});
+        setTypeFilterOptions(data.eventTypes || []);
       }
 
       function loadEvents(page) {
-        return fetch("/api/events?page=" + page + "&pageSize=12")
+        const params = new URLSearchParams({
+          page: String(page),
+          pageSize: "12"
+        });
+        if (eventFilters.level) params.set("level", eventFilters.level);
+        if (eventFilters.type) params.set("type", eventFilters.type);
+        if (eventFilters.q) params.set("q", eventFilters.q);
+        return fetch("/api/events?" + params.toString())
           .then((response) => response.json())
           .then((payload) => {
             currentPage = payload.page;
@@ -876,6 +1106,7 @@ function renderHtml(): string {
       function runAction(action, button) {
         if (!action) return;
         actionBusy = true;
+        document.querySelectorAll("[data-action]").forEach((node) => { node.disabled = true; });
         button.disabled = true;
         document.getElementById("actionResult").textContent = "Running " + action + "...";
         fetch("/api/actions", {
@@ -898,12 +1129,39 @@ function renderHtml(): string {
           })
           .finally(() => {
             actionBusy = false;
+            document.querySelectorAll("[data-action]").forEach((node) => { node.disabled = false; });
+          });
+      }
+
+      function saveSettings() {
+        configBusy = true;
+        const button = document.getElementById("saveConfig");
+        button.disabled = true;
+        const payload = {
+          checkIntervalMinutes: Number(document.getElementById("checkIntervalMinutes").value),
+          failureThreshold: Number(document.getElementById("failureThreshold").value),
+          recoveryCooldownMinutes: Number(document.getElementById("recoveryCooldownMinutes").value),
+          statusTimeoutMs: Number(document.getElementById("statusTimeoutMs").value)
+        };
+        document.getElementById("configResult").textContent = "Saving settings...";
+        fetch("/api/config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        })
+          .then((response) => response.json())
+          .then((result) => {
+            document.getElementById("configResult").textContent = result.ok ? result.message : "Save failed: " + (result.error || "unknown error");
+            return refreshDashboard({ page: currentPage || 1, resetTimer: true });
+          })
+          .finally(() => {
+            configBusy = false;
             button.disabled = false;
           });
       }
 
       function refreshDashboard(options = {}) {
-        if (refreshBusy || actionBusy) {
+        if (refreshBusy || actionBusy || configBusy) {
           return Promise.resolve();
         }
 
@@ -961,6 +1219,8 @@ function renderHtml(): string {
 
         const stateText = actionBusy
           ? "auto-refresh paused during action"
+          : configBusy
+          ? "auto-refresh paused during settings save"
           : "next refresh in " + refreshCountdown + "s";
         document.getElementById("meta").innerHTML =
           "Local zone: <strong>" + existingTimezone + "</strong>" +
@@ -1100,6 +1360,22 @@ function renderHtml(): string {
           .replaceAll('"', "&quot;")
           .replaceAll("<", "&lt;")
           .replaceAll(">", "&gt;");
+      }
+
+      function setConfigInputs(config) {
+        document.getElementById("checkIntervalMinutes").value = config.checkIntervalMinutes ?? "";
+        document.getElementById("failureThreshold").value = config.failureThreshold ?? "";
+        document.getElementById("recoveryCooldownMinutes").value = config.recoveryCooldownMinutes ?? "";
+        document.getElementById("statusTimeoutMs").value = config.statusTimeoutMs ?? "";
+      }
+
+      function setTypeFilterOptions(types) {
+        const select = document.getElementById("typeFilter");
+        const current = eventFilters.type;
+        select.innerHTML = "<option value=''>All types</option>" + types.map((type) => {
+          const selected = type === current ? " selected" : "";
+          return "<option value='" + escapeAttr(type) + "'" + selected + ">" + prettify(type) + "</option>";
+        }).join("");
       }
 
       ensureRefreshTimer();

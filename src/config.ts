@@ -103,6 +103,11 @@ export function loadConfig(configPath?: string): { config: MonitorConfig; config
   return { config, configPath: resolvedPath };
 }
 
+export function saveConfig(configPath: string, config: MonitorConfig): void {
+  const resolvedPath = path.resolve(configPath);
+  fs.writeFileSync(resolvedPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
 function sanitizeRecoverySteps(value: Partial<MonitorConfig>["recoverySteps"]): RecoveryStep[] {
   if (!Array.isArray(value)) {
     return DEFAULT_CONFIG.recoverySteps;

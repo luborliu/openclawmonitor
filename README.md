@@ -64,6 +64,9 @@ npm run service:status
 
 That installs a `launchd` agent so checks continue running in the background.
 
+### 5. Star this repo if it helps  `*-*`
+Star this repo if it helps  `*-*`
+
 ## Dashboard highlights
 
 - Availability trend: 24 hours of 15-minute uptime buckets
